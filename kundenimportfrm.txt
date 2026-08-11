@@ -1,0 +1,728 @@
+unit KIS.KundenImportFrm;
+
+interface
+
+uses
+  Windows, Messages, SysUtils, Variants, Classes, Graphics, Controls, Forms,
+  Dialogs, SystemCore.InfoFrm, WideStrings, cxGraphics, cxControls, cxLookAndFeels,
+  cxLookAndFeelPainters, cxStyles, cxCustomData, cxFilter, cxData, cxDataStorage, cxEdit, DB,
+  cxDBData, DBClient, QueryDataSet, cxClasses, dxBar, EnergyComponents.Bars, cxGridLevel,
+  cxGridCustomView, cxGridCustomTableView, cxGridTableView, cxGridDBTableView,
+  EnergyComponents.Grids, cxGrid, SqlExpr, EnergyComponents.Connection,
+  EnergyComponents.ActionManager, ActnList, ControlEnabler, StdCtrls, Buttons, ExtCtrls,
+  EnergyComponents.ButtonPanel, EnergyComponents.ScrollPanel, SystemCore.ParamTypes,
+  SystemCore.ViewContext, GPObjectModel, Lib32ObjectModelBase, GPStammdatenDtm,
+  EnergyComponents.Actions, EnergyComponents.ActionMenus, KIS.KundenExportImport.XMLObjekte,
+  EnergyBasics.KundeDataObjects, EnergyLibrary.Lists, Generics.Collections, XMLDoc, XMLIntf,
+  SystemCore.ConnectionPool, EnergyBasics.BasicsStammdatenDtm, Zaehlpunktdaten.BillingStammdatenDtm,
+  cxCheckBox, cxMemo, cxBarEditItem, EnergyComponents.Panel, DateUtils, KIS.ESM.EPEXUtils, KIS.KundenImport,
+  Mask, JvExMask, JvToolEdit, JvMaskEdit, JvCheckedMaskEdit, JvDatePickerEdit,
+  EnergyComponents.Separator, cxContainer, cxTextEdit, cxMaskEdit, cxDropDownEdit,
+  EnergyComponents.ComboBox, EnergyLibrary.Constants, KIS.KundenExportImport.Utils, EnergyLibrary.XMLDoc,
+  EnergyComponents.Edit, JvExStdCtrls, JvEdit, JvValidateEdit, EnergyComponents.CheckBox;
+
+type
+  TfrmKundenImport = class(TfrmSCInfo)
+    ecToolBar: TecToolBar;
+    ecBarManager1: TecBarManager;
+    ecActionMenu1: TecActionMenu;
+    actImport: TecAction;
+    KundenImportOpenDialog: TOpenDialog;
+    ecActionMenuItem1: TecActionMenuItem;
+    actDateiAuswahl: TecAction;
+    ecActionMenuItem2: TecActionMenuItem;
+    mLog: TMemo;
+    cbxEPEXImportieren: TCheckBox;
+    pnlStichtag: TecLayoutControlPanel;
+    jvDateStichtagVon: TJvDatePickerEdit;
+    jvDateStichtagBis: TJvDatePickerEdit;
+    cbxLetzteRechnungNurTeilRechnung: TCheckBox;
+    cbxEPEXFehlerIgnorieren: TCheckBox;
+    sepEsm: TecSeparator;
+    sepAllgemein: TecSeparator;
+    cbxFehlerIgnorieren: TCheckBox;
+    cbMndIdExport: TecComboBox;
+    cbxProdukteImportieren: TCheckBox;
+    rbStammdaten: TRadioGroup;
+    rbMeteringcodes: TRadioGroup;
+    ecRechnungsdaten: TecSeparator;
+    pnlRight: TPanel;
+    pnlLeft: TPanel;
+    pnlTop: TPanel;
+    rbRechnungsimport: TRadioGroup;
+    cbxAbnahmestellen: TCheckBox;
+    sepMda: TecSeparator;
+    cbxMdaNachrichtImport: TCheckBox;
+    cbxStammdatenMitFallback: TCheckBox;
+    actImportAndererMandant: TecAction;
+    amiecActionMenu1ImportAndererMandant: TecActionMenuItem;
+    cbxDummyStammdatenAnlegen: TCheckBox;
+    cbxMndIdXCheck: TCheckBox;
+    sepMehrfachaufruf: TecSeparator;
+    edtAnzahl: TJvValidateEdit;
+    edtZusatz1: TecEdit;
+    cbLogFile: TecCheckBox;
+    cbMdmSync: TecCheckBox;
+    cbxUTLVNichtImportieren: TCheckBox;
+    spHor: TSplitter;
+    procedure actImportExecute(Sender: TecAction; const ShiftState: TShiftState);
+    procedure actDateiAuswahlExecute(Sender: TecAction; const ShiftState: TShiftState);
+    procedure actImportUpdate(Sender: TObject);
+    procedure cbMndIdExportChange(Sender: TObject);
+
+    procedure actImportAndererMandantExecute(Sender: TecAction; const ShiftState: TShiftState);
+    procedure actImportAndererMandantUpdate(Sender: TObject);
+    procedure cbxStammdatenMitFallbackClick(Sender: TObject);
+    procedure cbxDummyStammdatenAnlegenClick(Sender: TObject);
+  private
+    FXmlDok: IXMLDocument; // Muss immer ein Interface sein!!!
+    FTables: TTablesObj;
+    FImpId: TLongId;
+    FImportIdVorgabe: TLongId;
+    FExportMndIdVorgabe: Integer;
+    FFileName: String;
+    FMndId: Integer;
+    FMandantId: TMndIdParam;
+    fKundenImport: TKundenImport;
+    fZuimportierendeKunden: TObjectList<TTableObj>;
+    FEckdaten: TExportEckdaten;
+
+    procedure DoImport;
+    procedure RefreshLastImportId;
+    procedure FillData(AMitMeldungen: Boolean = true);
+    function InternDoIt(AMndId: Integer; AImportIdVorgabe: TLongId; AExportMndIdVorgabe: Integer): Boolean;
+    procedure AktualisiereExpMndInfo;
+    function GetExportMndId: Integer;
+    procedure FreeXmlData;
+    procedure LoadXmlData(AMitMeldungen: Boolean = true);
+  protected
+    procedure AfterShow; override;
+  public
+    { Public-Deklarationen }
+    class function DoIt(AViewContext: TViewContext; AMndId: Integer): Boolean;
+    class function DoWeiterenImport(AViewContext: TViewContext; AMndId: Integer; AImportIdVorgabe: TLongId; AExportMndIdVorgabe: Integer): Boolean;
+    destructor Destroy; override;
+  published
+    property MandantId: TMndIdParam read FMandantId; // wird automatisch gefüllt
+    property Eckdaten : TExportEckdaten read FEckdaten;
+  end;
+
+implementation
+
+uses
+  EnergyLibrary.StringUtils, SystemCore.TableAliase, SystemCore.Types, SystemCore.CommonFunctions, SystemCore.Constants,
+  EnergyBasics.WorkflowErrorCollector, EnergyBasics.GPDataObjects, Kundenabrechnung.BetreiberanlageWizardFrm,
+  EnergyModuleBase.ESMUtils, Lib32VCLBugfix, SystemCore.ThreadedProgress,
+  Lib32InputQueryFrm, EnergyBasics.ConnectUtils, SystemCore.MndSelectDialogFrm, Lib32Divers, FastMM4, StrUtils;
+
+{$R *.dfm}
+
+{ TfrmKundenImport }
+
+class function TfrmKundenImport.DoIt(AViewContext: TViewContext; AMndId: Integer) : Boolean;
+var
+  FrmKundenImport: TfrmKundenImport;
+begin
+  FrmKundenImport := TfrmKundenImport.CreateAsTabModal(AViewContext, AMndId);
+  try
+    result := FrmKundenImport.InternDoIt(AMndId, TLongId.Null, NULL_INTEGER);
+  finally
+    FrmKundenImport.Free;
+  end;
+end;
+
+class function TfrmKundenImport.DoWeiterenImport(AViewContext: TViewContext; AMndId: Integer;
+  AImportIdVorgabe: TLongId; AExportMndIdVorgabe: Integer): Boolean;
+var
+  FrmKundenImport: TfrmKundenImport;
+begin
+  if AImportIdVorgabe.IsNull then
+  begin
+    ShowMessage('Keine ImportId übergeben!');
+    result := false;
+    exit;
+  end;
+
+  if AExportMndIdVorgabe = NULL_INTEGER then
+  begin
+    ShowMessage('Keinen ExportMndId übergeben!');
+    result := false;
+    exit;
+  end;
+
+  FrmKundenImport := TfrmKundenImport.CreateAsTabModal(AViewContext, AMndId);
+  try
+    result := FrmKundenImport.InternDoIt(AMndId, AImportIdVorgabe, AExportMndIdVorgabe);
+  finally
+    FrmKundenImport.Free;
+  end;
+end;
+
+function TfrmKundenImport.InternDoIt(AMndId: Integer; AImportIdVorgabe: TLongId; AExportMndIdVorgabe: Integer): Boolean;
+begin
+  FXmlDok := nil;
+  FreeAndNil(FTables);
+  fMndId := aMndId;
+  fKundenImport := TKundenImport.Create;
+  FImportIdVorgabe := AImportIdVorgabe;
+  FExportMndIdVorgabe := AExportMndIdVorgabe;
+  FImpId := AImportIdVorgabe;
+  mLog.Clear;
+  if not FImportIdVorgabe.IsNull then
+  begin
+    if FExportMndIdVorgabe = NULL_INTEGER then
+    begin
+      dialog.ShowError('Keine Export-Mandant ausgewählt!');
+      abort;
+    end;
+    mLog.lines.Add('Zusätzlicher Import aus anderem KIS mit ImportId ' + FImportIdVorgabe.ToStr + ' und ExportMnd = ' + IntToStr(AExportMndIdVorgabe));
+  end;
+
+  jvDateStichtagVon.Date := EncodeDate(1900, 1, 1);
+
+  fZuimportierendeKunden := TObjectList<TTableObj>.Create;
+  cbMndIdExport.items.Clear;
+  AktualisiereExpMndInfo;
+
+  Result := ShowModal = mrOk;
+end;
+
+procedure TfrmKundenImport.RefreshLastImportId;
+var impHelper : TImportMapHelper;
+begin
+  rbMeteringcodes.Tag := NULL_INTEGER;
+  if not FImpId.IsNull then
+    rbMeteringcodes.Tag := FImpId.Id
+  else
+  if not FImportIdVorgabe.IsNull then
+    rbMeteringcodes.Tag := FImportIdVorgabe.Id
+  else
+  begin
+    impHelper := TImportMapHelper.Create(Connection);
+    try
+    rbMeteringcodes.Tag := impHelper.ExportIdentifier2ImpId(FFileName, eckdaten.ExportIdentifier)
+    finally
+      impHelper.Free;
+    end;
+  end;
+
+  if rbMeteringcodes.Items.Count = 3 then
+    rbMeteringcodes.Items.Delete(2);
+
+  if rbMeteringcodes.Tag = NULL_INTEGER then
+    rbMeteringcodes.ItemIndex := 0
+   else
+  begin
+    rbMeteringcodes.Items.Add('Weiteren Mandanten importieren: Fachliche Mappings aus letztem Import (ImpId: ' + IntToStr(rbMeteringcodes.Tag) + ') verwenden ');
+    if FImportIdVorgabe.IsNull then
+      rbMeteringcodes.ItemIndex := 0
+    else
+      rbMeteringcodes.ItemIndex := rbMeteringcodes.Items.Count-1;
+  end;
+end;
+
+procedure TfrmKundenImport.LoadXmlData(AMitMeldungen: Boolean = true);
+begin
+  FreeXmlData;
+  Screen.Cursor := crHourGlass;
+  try
+    // doc hier alleine stehend, damit wegen des UseOwnMemoryManager keine IXMLNode länger leben als "doc"
+    FXmlDok := LoadXmlFromFile(FFileName);
+    FillData(AMitMeldungen);
+  finally
+    Screen.Cursor := crDefault;
+  end;
+end;
+
+function TfrmKundenImport.GetExportMndId: Integer;
+begin
+  result := NULL_INTEGER;
+  if cbMndIdExport.items.Count = 1 then
+    result := StrToIntDef(cbMndIdExport.Items[cbMndIdExport.ItemIndex], NULL_INTEGER)
+  else
+  if cbMndIdExport.Visible and (cbMndIdExport.ItemIndex >=0) then
+    result := StrToIntDef(cbMndIdExport.Items[cbMndIdExport.ItemIndex], NULL_INTEGER);
+end;
+
+procedure TfrmKundenImport.FillData(AMitMeldungen: Boolean = true);
+var
+  nodeTables: IXMLNode;
+  i, j: Integer;
+  msg, kndNr, kndId: String;
+  childTable: TTableObj;
+  column: TColumnObj;
+  kndIdList: TStringList;
+  eckdatenOk: Boolean;
+  impHelper : TImportMapHelper;
+  mndCol: TColumnObj;
+  wartenThread : TThreadedProgress;
+
+begin
+  if not TXmlUtils.IsKundenExportXmls(FXmlDok) then
+  begin
+    msg := 'Keine gültige XML-Datei des Kundenexports';
+    if TXmlUtils.IsAnlagenExportXmls(FXmlDok) then
+      msg := msg + ' - Die Datei wurden mit Anlagen-Export erzeugt und muss auch daher mit dem Anlagen-Import importiert werden.';
+    Dialog.ShowError(msg);
+    abort;
+  end;
+
+  FTables := TTablesObj.Create;
+  fZuimportierendeKunden.Clear;
+  kndIdList := TStringList.Create(true);
+  FreeAndNil(FEckdaten);
+  Feckdaten := TExportEckdaten.Create(FMndId, false);
+  if edtAnzahl.Value = 1 then
+  begin
+    mLog.Clear;
+  end;
+  mLog.Lines.Add('================================ ' + FFileName + ' ================================');
+  impHelper := TImportMapHelper.Create(Connection);
+  wartenThread := TThreadedProgress.Create('Lese und analysiere XML', false, 0);
+  try
+    Application.ProcessMessages;
+    WartenThread.SetStatus('Lade Eckdaten');
+    eckdatenOk := eckdaten.LoadExportData(FXmlDok.DocumentElement);
+    cbMndIdExport.Items.Clear;
+    cbxProdukteImportieren.State := cbGrayed;
+    if eckdatenOk then
+    begin
+      eckdaten.WriteToLog(mLog.Lines);
+      cbMndIdExport.Items.CommaText := eckdaten.ExportAlleMndIds.CommaText;
+      if FExportMndIdVorgabe <> NULL_INTEGER then
+      begin
+         if (cbMndIdExport.Items.IndexOf(IntToStr(FExportMndIdVorgabe)) >= 0) then
+            cbMndIdExport.ItemIndex := cbMndIdExport.Items.IndexOf(IntToStr(FExportMndIdVorgabe))
+         else
+         begin
+           Dialog.ShowError('Keinen Export-Mandanten mit MndId = ' + IntToStr(FExportMndIdVorgabe) + ' gefunden!');
+           abort;
+         end;
+      end
+       else
+      if eckdaten.ExportVonWilkenInternerUmgebung and
+        (cbMndIdExport.Items.IndexOf(IntToStr(MandantId)) >= 0) then
+        cbMndIdExport.ItemIndex := cbMndIdExport.Items.IndexOf(IntToStr(MandantId))
+      else
+        cbMndIdExport.ItemIndex := cbMndIdExport.Items.IndexOf(IntToStr(eckdaten.ExportMndId));
+
+      if eckdaten.ExportVonWilkenInternerUmgebung then
+        rbStammdaten.ItemIndex := 0
+      else
+        rbStammdaten.ItemIndex := 1;
+
+      if eckdaten.ExportMitPrd > 0 then
+        cbxProdukteImportieren.State := cbChecked
+      else
+      if eckdaten.ExportMitPrd = 0 then
+        cbxProdukteImportieren.State := cbUnchecked;
+      cbxProdukteImportieren.Enabled := eckdaten.ExportMitPrd > 0;
+      cbxAbnahmestellen.Checked := eckdaten.ExportHasAbnInfos;
+      cbxAbnahmestellen.Enabled := eckdaten.ExportHasAbnInfos;;
+    end
+     else
+    begin
+      cbMndIdExport.ItemIndex := -1;
+      cbxAbnahmestellen.Checked := false;
+      cbxAbnahmestellen.Enabled := false;
+    end;
+
+    cbMndIdExport.Visible := cbMndIdExport.Items.Count > 1;
+    nodeTables := TXmlUtils.GetAndCheckChildXmlNode(FXmlDok.DocumentElement, XML_TAG_TABLES, true);
+    WartenThread.SetStatus('Lese Tabellen');
+    Application.ProcessMessages;
+    FTables.LoadFromXML(ViewContext, Connection, nodeTables);
+    if cbxMndIdXCheck.Checked then
+    begin
+      WartenThread.SetStatus('Analysiere MandantIds');
+      for i := 0 to FTables.Childs.Count - 1 do
+      begin
+        childTable := FTables.Childs.Items[i];
+        mndCol := childTable.GetColumnByName('MND_ID', false);
+        if (mndCol <> nil) and
+           (mndCol.ValueBereinigt <> '') and
+           (mndCol.ValueBereinigt <> childTable.ExportMndId) then
+          mLog.Lines.Add(childTable.Tablename + ': ExportMandant <> MandanId: ' + childTable.GetIdentifier);
+
+        if (not eckdatenOk and not (rbStammdaten.ItemIndex >0) and (childTable.Tablename = XML_TAG_INTERNER_WILKEN_KUNDE)) then
+          rbStammdaten.ItemIndex := 0;
+      end;
+    end;
+
+    if not eckdatenOk and not (rbStammdaten.ItemIndex >0) then
+    begin
+      for i := 0 to FTables.Childs.Count - 1 do
+      begin
+        childTable := FTables.Childs.Items[i];
+        if (childTable.Tablename = XML_TAG_INTERNER_WILKEN_KUNDE) then
+        begin
+          rbStammdaten.ItemIndex := 0;
+          break;
+        end;
+      end;
+    end;
+
+    WartenThread.SetStatus('Suche Kunden');
+    mLog.lines.Add('Enthaltene Kunden');
+    mLog.lines.Add('-----------------------------------------------');
+
+    for i := 0 to FTables.Childs.Count - 1 do
+    begin
+      childTable := FTables.Childs.Items[i];
+      if (childTable.Tablename <> ENKND) then
+        continue;
+      kndNr := '';
+      for j := 0 to childTable.Columns.Count - 1 do
+      begin
+        column := childTable.Columns.Items[j];
+        if (column.Columnname = 'KND_ID') then
+        begin
+          kndId := column.Value
+        end
+        else if (column.Columnname = 'MND_ID') then
+        begin
+          kndNr := 'Mnd ' + entferneHochkomma(column.Value);
+        end
+        else if (column.Columnname = 'KND_NR1') then
+        begin
+          kndNr := kndNr + ' KndNr ' + column.ValueBereinigt + ' / kndId: ' + kndId;
+          if kndIdList.IndexOf(kndId) >= 0 then
+          begin
+            mLog.Lines.Add('!!!!!!! Kunde mehrfach im Export: ' + kndNr);
+            if not cbxMndIdXCheck.Checked then
+            begin
+              msg := 'Der Kunde ' + kndNr + ' wurde mehrfach exportiert. ' + CR_LF +
+               'Dies deutet auf Datenschrott (Mandant-Bezogene Datensätze wurden in anderem Mandanten verwendet) hin' + CR_LF +
+               'Bitte ggf "' + cbxMndIdXCheck.Caption + '" aktivieren!';
+              if AMitMeldungen then
+                Dialog.ShowInfo(msg);
+            end;
+          end
+          else
+          begin
+             kndIdList.Add(kndId);
+             mLog.Lines.Add(kndNr);
+          end;
+          if cbxMndIdXCheck.Checked then
+            mLog.Lines[mLog.Lines.count - 1] := mLog.Lines[mLog.Lines.count - 1]
+               + ' / ExportMnd ' + childTable.ExportMndId;
+
+          break;
+        end;
+      end;
+    end;
+    RefreshLastImportId;
+    AktualisiereExpMndInfo;
+  finally
+    wartenThread.free;
+    impHelper.Free;
+    kndIdList.Free;
+  end;
+end;
+
+procedure TfrmKundenImport.DoImport;
+var
+  kundenImport: TKundenImport;
+  wartenThread : TThreadedProgress;
+  i,J, prdImport, Anzahl: Integer;
+  ImportOptionen : TImportOptionen;
+begin
+  inherited;
+
+  if cbxUTLVNichtImportieren.Checked then
+  begin
+    I := 0 ;
+    while i < FTables.Childs.Count do
+    begin
+      if StartsText('CREATOR.EDUT', FTables.Childs.Items[i].Tablename) then
+        FTables.Childs.Delete(I)
+      //else if StartsText('CREATOR.EDREM', FTables.Childs.Items[i].Tablename) then
+      //  FTables.Childs.Delete(I)
+      else
+        inc(i);
+    end;
+  end;
+
+  if rbMeteringcodes.ItemIndex = -1 then
+    raise Exception.Create('Kein Wert für "' + rbMeteringcodes.Caption + '" ausgewählt!');
+
+  if rbStammdaten.ItemIndex = -1 then
+    raise Exception.Create('Kein Wert für "' + rbStammdaten.Caption + '" ausgewählt!');
+
+  if rbRechnungsimport.Enabled and (rbRechnungsimport.ItemIndex = -1) then
+    raise Exception.Create('Kein Wert für "' + rbRechnungsimport.Caption + '" ausgewählt!');
+
+  if GetExportMndId = NULL_INTEGER then
+    raise Exception.Create('Kein (Export-)Mandant ausgewählt!');
+
+  ImportOptionen := TImportOptionen.Create;
+  ImportOptionen.EPEXImportieren := cbxEPEXImportieren.Checked;
+  ImportOptionen.StandardStammdaten := rbStammdaten.ItemIndex = 1;
+  ImportOptionen.LetztesRechnungsdatumAufNull := rbRechnungsimport.ItemIndex = 0;
+  ImportOptionen.RechnungenImportieren := rbRechnungsimport.ItemIndex = 1;
+  ImportOptionen.StichtagVon := jvDateStichtagVon.Date;
+  ImportOptionen.StichtagBis := jvDateStichtagBis.Date;
+  ImportOptionen.LetzteRechnungNurTeilRechnung := cbxLetzteRechnungNurTeilRechnung.Checked;
+  ImportOptionen.MeteringcodeUndMaloNeuGenerieren := rbMeteringcodes.ItemIndex = 0;
+  ImportOptionen.EPEXFehlerIgnorieren := cbxEPEXFehlerIgnorieren.Checked;
+  ImportOptionen.StammdatenWieExport := rbStammdaten.Itemindex = 0;
+  ImportOptionen.FehlerIgnorieren := cbxFehlerIgnorieren.Checked;
+  ImportOptionen.ImportiereAbnahmestellen := cbxAbnahmestellen.Checked;
+  ImportOptionen.MitMdaNachrichten := cbxMdaNachrichtImport.Checked;
+  ImportOptionen.StammdatenMitFallback := cbxStammdatenMitFallback.Checked;
+  ImportOptionen.DummyStammdatenAnlegen := cbxDummyStammdatenAnlegen.Checked;
+  ImportOptionen.ImportMitMndXCheck := cbxMndIdXCheck.Checked;
+  ImportOptionen.UtlvNichtImportieren := cbxUTLVNichtImportieren.Checked;
+
+  Anzahl := edtAnzahl.Value;
+
+  for J := 0 to Anzahl - 1 do
+  begin
+    if FTables = nil then
+      LoadXmlData(false);
+
+    wartenThread := TThreadedProgress.Create('Importiere Kunden', false, 0);
+    kundenImport := TKundenImport.Create;
+    try
+      if not FImportIdVorgabe.IsNull then
+        FimpId := FImportIdVorgabe
+      else
+      if rbMeteringcodes.ItemIndex = 2 then
+        FimpId := TLongId.From(rbMeteringcodes.Tag)
+      else
+        FimpId := TLongId.Null;
+
+      mLog.Lines.Add(CR_LF + '-----------------------------  Import ' + IntToStr(J + 1) + ' -----------------------------');
+      mLog.Lines.Add('Datenbank: ' + ConnectionPool.DBAlias);
+      mLog.Lines.Add('MndId: ' + IntToStr(FMndId));
+      mLog.Lines.Add('Datum: ' + DateTimeToStr(now)+ CR_LF);
+      if (FImpId.IsNull) then
+        mLog.Lines.Add('ImpId: ' + '-')
+      else
+        mLog.Lines.Add('ImpId: ' + FImpId.ToStr);
+      if GetExportMndId <> NULL_INTEGER then
+        mLog.Lines.Add('Einschränkung auf (Export-)MndId: ' + IntToStr(GetExportMndId));
+      prdImport := NULL_INTEGER;
+      if cbxProdukteImportieren.State = cbChecked then
+        prdImport := 1
+      else
+      if cbxProdukteImportieren.State = cbUnchecked then
+        prdImport := 0;
+
+      kundenImport.WartenThread := wartenThread;
+      kundenImport.ImportKundenListe(Connection, FMndId, FFileName, True, GetExportMndId, mLog.Lines,
+          prdImport, FImpId, FTables, FEckdaten, FXmlDok, ImportOptionen, edtZusatz1.Text, cbMdmSync.Checked);
+      FreeXmlData;
+      FreeAndNil(wartenThread);
+      if (kundenImport.getImportierteKunden.Count = 0) then
+      begin
+        mLog.Lines.Add('Es wurden keine Kunden importiert');
+
+        if Anzahl = 1 then
+        begin
+          Dialog.ShowInfo('Es wurden keine Kunden importiert');
+        end;
+      end
+      else
+      begin
+        if Anzahl = 1 then
+        begin
+          Dialog.ShowInfo(kundenImport.getImportierteKunden.Text);
+        end;
+        mLog.Lines.Add('Es wurden folgene Kunden importiert:');
+        for i := 0 to kundenImport.getImportierteKunden.Count - 1 do
+          mLog.Lines.Add(kundenImport.getImportierteKunden.Strings[i]);
+      end;
+      if not cbLogFile.Checked then
+      begin
+        mLog.Lines.SaveToFile(FFileName + '.' + FormatDateTime('yyyyMMddHHmmss', now) + '.Mnd' + IntToStr(MandantId) + '.log');
+      end;
+      mLog.Lines.Add('---------------------------------------------------------------------');
+      mLog.Lines.add('Log-Datei gespeichert unter "' + FFileName + '.log"');
+      RefreshLastImportId;
+    finally
+      wartenThread.free;
+      kundenImport.Free;
+      ImportOptionen.Free;
+    end;
+
+    FTables.Free;
+  end;
+end;
+
+procedure TfrmKundenImport.actImportAndererMandantExecute(Sender: TecAction;
+  const ShiftState: TShiftState);
+var mandant: TMandantParam;
+    mndStr: String;
+    mndId, exportMndId: Integer;
+    CS2Mandanten: TMandantParamArray;
+    impId: TLongId;
+begin
+  inherited;
+  CS2Mandanten := LoadAllMandanten;
+
+  if not TfrmMndSelectDialog.ShowMandantSelection(ViewContext, CS2Mandanten, mandant, true, true, 'Import-Mandant wählen') then
+    exit;
+  mndId := StrToInt(mandant);
+  if mndId = MandantId then
+  begin
+    Dialog.ShowError('Aktueller Mandant gewählt - dies ist nicht erlaubt');
+    exit;
+  end;
+  mndStr := IntToStr(mndId);
+  if not ShowInputQuery(ViewContext, 'ExportMndId: ', mndStr) then
+    exit;
+  exportMndId := StrToIntDef(mndStr, NULL_INTEGER);
+  if exportMndId = NULL_INTEGER then
+    exit;
+  if cbMndIdExport.items.IndexOf(mndStr) < 0 then
+  begin
+    Dialog.ShowError('Ungültiger Export-Mandant');
+    exit;
+  end;
+  if FImpId.IsNull then
+    impId := TLongId.From(rbMeteringcodes.Tag) // noch kein Import im Formular gelaufen
+  else
+    impId := FImpId;
+  TEBConnectUtils.KISExecuteKundenImportInAnderemMandanten(mndId, impId, exportMndId);
+end;
+
+procedure TfrmKundenImport.actImportAndererMandantUpdate(Sender: TObject);
+begin
+  inherited;
+  actImportAndererMandant.Enabled := (cbMndIdExport.ItemIndex >= 0) and
+    ((rbMeteringcodes.Tag <> NULL_INTEGER) or not FImpId.IsNull);
+end;
+
+procedure TfrmKundenImport.actImportExecute(Sender: TecAction; const ShiftState: TShiftState);
+begin
+  inherited;
+  DoImport;
+end;
+
+procedure TfrmKundenImport.actImportUpdate(Sender: TObject);
+begin
+  inherited;
+  actImport.Enabled := FFileName <> '';
+end;
+
+procedure TfrmKundenImport.AfterShow;
+var impHelper : TImportMapHelper;
+    db: String;
+    isEntwickler: Boolean;
+
+begin
+  cbxDummyStammdatenAnlegen.Visible := true;
+  isEntwickler := false;
+  if ContainsText(Uppercase(DBAlias), 'UL-DIAPP') then
+  begin
+     // Nur auf UL-Diapps < 20 (Entwickler-Maschinen) erlauben!
+     db := copy(dbalias, pos('UL-DIAPP', Uppercase(DBAlias)) + 8 ,2);
+     if (db[2] = '-') then
+       db := db[1];
+      isEntwickler := StrToIntDef(db, 40) < 20;
+  end;
+  if not isEntwickler then
+  begin
+    cbxDummyStammdatenAnlegen.Caption := cbxDummyStammdatenAnlegen.Caption + ' (Nicht erlaubt, QS-Umgebung)';
+    isEntwickler := DebugHook > 0;
+  end;
+
+  cbxDummyStammdatenAnlegen.Enabled := isEntwickler;
+  if FImportIdVorgabe.IsNull then
+    actDateiAuswahl.Execute()
+  else
+  begin
+    impHelper := TImportMapHelper.Create(Connection);
+    try
+      impHelper.Initialize('', '', FImportIdVorgabe, false);
+      FFileName := impHelper.Dateiname;
+      caption := 'Kunden-Import ' + FFileName;
+      if not FileExists(impHelper.Dateiname) then
+      begin
+        Dialog.ShowError('Importdatei ' + impHelper.Dateiname + ' nicht gefunden!');
+        abort;
+      end;
+      LoadXmlData;
+      actImport.Execute();
+      ModalResult := mrOk;
+    finally
+      impHelper.free;
+    end;
+  end;
+end;
+
+procedure TfrmKundenImport.AktualisiereExpMndInfo;
+var expMndId: String;
+begin
+  if (Eckdaten = nil) or (cbMndIdExport.ItemIndex = -1) then
+  begin
+    rbRechnungsimport.Enabled := false;
+    rbRechnungsimport.ItemIndex := 0;
+    pnlStichtag.Visible := false;
+    sepEsm.Visible := false;
+  end
+  else
+  begin
+    expMndId := IntToStr(GetExportMndId);
+    rbRechnungsimport.Enabled := not Eckdaten.ExportMitRechnungsdatenVorhanden or (Eckdaten.ExportMitRechnungsdaten.IndexOf(expMndId) >=0);
+    if not Eckdaten.ExportMitRechnungsdatenVorhanden or (Eckdaten.ExportMitRechnungsdaten.IndexOf(expMndId) >=0) then
+      rbRechnungsimport.ItemIndex := 1
+    else
+      rbRechnungsimport.ItemIndex := 0;
+    pnlStichtag.Visible := rbRechnungsimport.ItemIndex = 1;
+    sepEsm.Visible := (not FEckdaten.ExportEsmMndVorhanden // unbekannt
+                       or (FEckdaten.ExportEsmMnd = GetExportMndId)) and
+                       IsESMAktiv(MandantId)
+  end;
+end;
+
+procedure TfrmKundenImport.cbMndIdExportChange(Sender: TObject);
+begin
+  AktualisiereExpMndInfo;
+end;
+
+procedure TfrmKundenImport.cbxDummyStammdatenAnlegenClick(Sender: TObject);
+begin
+  inherited;
+  if cbxDummyStammdatenAnlegen.Checked then
+    cbxStammdatenMitFallback.Checked := true;
+end;
+
+procedure TfrmKundenImport.cbxStammdatenMitFallbackClick(Sender: TObject);
+begin
+  inherited;
+  cbxDummyStammdatenAnlegen.enabled := cbxStammdatenMitFallback.Checked and (DebugHook > 0);
+end;
+
+destructor TfrmKundenImport.Destroy;
+begin
+  inherited;
+  fZuimportierendeKunden.Free;
+  fKundenImport.Free;
+  FreeXmlData;
+end;
+
+procedure TfrmKundenImport.FreeXmlData;
+begin
+  if FXmlDok = nil then
+    exit;
+  FXmlDok.Active := false;
+  FXmlDok := nil; // Nie Freigeben!!! Muss Interface bleiben!!!
+  FreeAndNil(FTables);
+  FreeAndNil(FEckdaten);
+end;
+
+procedure TfrmKundenImport.actDateiAuswahlExecute(Sender: TecAction;
+  const ShiftState: TShiftState);
+begin
+  inherited;
+  if (KundenImportOpenDialog.Execute(Handle)) then
+  begin
+    FFileName := KundenImportOpenDialog.FileName;
+    caption := 'Kunden-Import ' + FFileName;
+    LoadXmlData;
+  end;
+end;
+
+end.

@@ -1,0 +1,3750 @@
+unit KIS.KundenExportImport.Objects;
+
+interface
+
+uses
+  SysUtils, Variants, Classes,
+  WideStrings, SqlExpr, EnergyComponents.Connection,
+  SystemCore.ParamTypes, DB,
+  EnergyLibrary.Lists, Generics.Collections, Lib32SystemZeitDtm, EnergyLibrary.Constants,
+  SystemCore.TableAliase, EnergyLibrary.StringUtils,
+  XMLIntf, SystemCore.ConnectionPool, EnergyLibrary.XMLDoc,
+  StrUtils, Lib32DBMetaData, SystemCore.ViewContext, Lib32Divers, EnergyLibrary.DBUtils,
+  EnergyFrames.MessageDialogFrm, SystemCore.ThreadedProgress, SystemCore.Customers,
+  EnergyBasics.ExportFrm, Contnrs, KIS.KundenExportImport.Utils, SystemCore.DBModel,
+  KIS.KundenExportImport.XMLObjekte, EnergyBasics.Constants;
+
+type
+  TVerarbeiteQueryProc = reference to procedure(ASqlQuery: TSQLQuery);
+
+  TExpImpObjectManager = class;
+
+  IKundenExport=Interface(IInterface)
+    procedure AddToMprdList(AMpidNummer: String);
+    procedure CheckIsCanceled;
+  End;
+
+  IKundenImport=Interface(IInterface)
+    function GetMappedMeteringCode(AMeteringCode: String): String;
+    function GetMappedMaloCode(AMaloCode: String): String;
+    function GetImportObjects: TExpImpObjectManager;
+    function GetMappedDateiName(ADateiname: String): String;
+    function GetMappedEdiRef(ARefNr: String; ALength: Integer = 35): String;
+    function GetMappedGeraeteNr(AGeraeteNr: String): String;
+    function GetMappedSreCode(ASreCode: String): String;
+    function GetMappedTreCode(ATreCode: String): String;
+    function GetMappedNeloCode(ANeloCode: String): String;
+    function GetMappedMpidNummer(AMpidNummer: String): String;
+    function GetMappedRechnungsNr(ARechnungsNr: String; ALength: Integer = 35): String;
+    function GetMappedKndNr1(AKndNr1: String): String;
+    function GetMappedNwsPaketId(ANwsPaketId: String; ALength: Integer = 11): String;
+    procedure AddLog(AMessage: String);
+  End;
+
+  TAnonymisierungsDatenTyp=(pdName, pdVorname, pdStrasse, pdHausUnterNr,
+       pdOrt, pdPlz, pdHausnr, pdAnsprechpartner,  pdAnsprechpartnerEmail, pdTelNr, pdMail,
+       pdSenderName, pdSenderStrasse, pdSenderHausNr, pdSenderPlz, pdSenderOrt,
+       pdEmpfaengerName, pdEmpfaengerStrasse, pdEmpfaengerHausNr, pdEmpfaengerPlz, pdEmpfaengerOrt);
+
+
+  TIdMapping = class(TDictionary<Int64, Int64>)
+  end;
+
+  TTableIdMapping = class
+  private
+    FDTable: TDBModelTable;
+    FTableName: String;
+    FSequenceName,
+    FIdFieldName: String;
+    FIdMapping: TIdMapping;
+  public
+    constructor Create(ATableName, AIdFieldName, ASequenceName: String);
+    destructor Destroy; override;
+    procedure Clear;
+    Function IsRelevant(ATableName, AColumnName: String): Boolean;
+
+    property TableName: String read FTableName;
+    property SequenceName: String read FSequenceName;
+    property IdFieldName: String read FIdFieldName;
+    property IdMapping: TIdMapping read FIdMapping;
+  end;
+
+  TExpImpTableObj = Class(TObject)
+  private
+    FOwner: TExpImpObjectManager;
+    FDTable: TDBModelTable;
+    FIdFeldName,
+    FTableName,
+    FIdentifier: String;
+    FIdsPrepared,
+    FIdsChildSelected,
+    FIdsSelektiert: TelSimpleLongIdList;
+    FIdsSelektiertDebug: TelLongIdStringMap;
+    FChildTables: TStringList;
+    FImportValues: TelObjectList<TTableObj>;
+
+    FImportNachlauf: TelObjectList<TTableObj>;
+
+    FTableIdMapping: TTableIdMapping;
+    FOwnsTableIdMapping: Boolean;
+    FCanDoImport: Boolean;
+    FCandoExport:Boolean;
+    FParents: TelObjectList<TExpImpTableObj>;
+    function GetIdDebugInfo(AId: TLongId): String;
+    function IsSelbstreferenzierendeSpalte(AColumn: TDBModelColumn): Boolean;
+
+  protected
+    FAutoPrepareParentIds: Boolean; // ggf. die ParentIds in abh. der aktuellen ID gleich mit selektieren
+    FAutoSelectChildIds: Boolean;  // ggf. alle untergeordnerten Tabellen auch mit selektieren
+    function PrepareParentId(AConnection: TecConnection; AId: TLongId; AParent: TExpImpTableObj; AColumnName: String): boolean;
+    function PrepareId(AConnection: TecConnection; AKundenExport: IKundenExport; AId: TLongId; AExpImpManager: TExpImpObjectManager): boolean; virtual;
+    function GetRefColumns(ATableName: string; AColumnsRef: TStrings): Boolean;
+
+    procedure SortImportValues; // Für Selbstreferenzierende Tabellen: Zuerst alle ohne Selbstref, und dann sortiert nach ID
+
+    function DoInitialSelect(AConnection: TecConnection; ASql: String; AIdParamName: String; AIdListe: TelSimpleIntegerList; ADoMore: TVerarbeiteQueryProc = nil): Integer; overload;
+    function DoInitialSelect(AConnection: TecConnection; ASql: String; AIdParamName: String; AIdListe: TelSimpleLongIdList; ADoMore: TVerarbeiteQueryProc = nil): Integer; overload;
+
+    function SelectOther(AQuery: TSqlQuery; ATableName, AFieldName:String; AConnection: TecConnection; AKundenExport: IKundenExport; AExpImpManager: TExpImpObjectManager): boolean;
+    function GetSqlDebugInfo(AQuery: TSqlQuery): String;
+  public
+    constructor Create(AOwner: TExpImpObjectManager; ATable: String; ATableIdMapping: TelStringObjectMap<TTableIdMapping>; AIdentifier: String = '');
+
+    procedure Clear;
+    destructor Destroy; override;
+    function AddChildTable(AChildTable: String): TExpImpTableObj; // Muss auch ein TExpImpTableObj sein! Rückgabewert = aktuelles Objekt!
+
+    // Import
+    function DisableImport: TExpImpTableObj; // Muss auch ein TExpImpTableObj sein! Rückgabewert = aktuelles Objekt!
+    procedure AnonymisiereFeldWert(AColumn: TColumnObj); virtual; // Aufruf aus Fill-Table
+    procedure AddImportValues(ATable: TTAbleObj);
+    function HasImportValues: Boolean;
+
+    function GetNewColumnValue(ATable: TTAbleObj; AColumn:TColumnObj; AKundenImport: IKundenImport;
+                         Var ANewValue: String; AForInsert: Boolean):Boolean; virtual;     // Für Anonymisierungen oder Key-Value-Tabellen-Mappings
+    // IDs setzen/generieren, Import-Reihenfolge festlegen etc
+    procedure PrepareImport(AConnection: TecConnection; AKundenImport: IKundenImport); virtual;
+    procedure PreparePksForImport(AConnection: TecConnection; ATable: TTAbleObj; AKundenImport: IKundenImport); virtual;
+    function CanDoImport(ATable: TTAbleObj; AKundenImport: IKundenImport): Boolean; virtual;
+
+    procedure DoImportNacharbeiten(AConnection: TecConnection; AKundenImport: IKundenImport);
+
+    function PrepareSelectedIds(AConnection: TecConnection; AKundenExport: IKundenExport; AExpImpManager: TExpImpObjectManager): Boolean; // Falls durch das aktuelle Objekt noch weitere Objekte übernommen werden müssen, z.B. EDINV -> EDDAT, EDEPR. Liefert true, falls etwas zusätzliches selektiert wurde
+    function CheckObSchonExportiert(ATableName: String; Qry: TSQLQuery; AMndKndIdListe: TelSimpleLongIdList): Boolean; virtual;
+    procedure SelectExportIds(AConnection: TecConnection; ASql: string);
+    function SelectIdForExport(AQry: TSQLQuery; ASelectedBy: String; AFieldName:String = ''): Boolean; overload;
+    function SelectIdForExport(AId: TLongId; ASelectedBy: String):Boolean; overload;
+
+    function SetExportEnabled(AValue: Boolean): TExpImpTableObj; // Falls das Objekt da sein muss, aber kein Export stattfinden darf
+    function SetImportEnabled(AValue: Boolean): TExpImpTableObj;
+    function SetAutoSelectChildIds(AValue: Boolean): TExpImpTableObj; // Falls das Objekt nur indirekt durch untergeordnete Elemente selektiert wird, aber automatisch durch den Export des Elements nicht alle (!) untergeordneten Elemente mitgenommen werden müssen
+
+    function SelectIds(AConnection: TecConnection; AExpImpManager: TExpImpObjectManager): Boolean; // Führt die eigentlichen Selects zur ausgewählten ID für den Export aus
+    property TableName: String read FTableName;
+    property Identifier: String read FIdentifier;
+    property DefaultFieldName: String read FIdFeldName;
+    property IdsSelektiert : TelSimpleLongIdList read FIdsSelektiert;
+    property IdDebugInfo[AID: TLongId]: String read GetIdDebugInfo;
+    property ChildTables: TStringList read FChildTables;
+    property AutoSelectChildIds: boolean read FAutoSelectChildIds;
+    property IdFieldName: String read FIdFeldName;
+
+    property ImportValues: TelObjectList<TTAbleObj> read FImportValues;
+    property TableIdMapping: TTableIdMapping read FTableIdMapping;
+    property CanDoExport: boolean read FCanDoExport write FCanDoExport;
+    property Parents: TelObjectList<TExpImpTableObj> read FParents;
+  End;
+
+  TExportEdNachrichtEpv = class(TExpImpTableObj)
+  private
+    FSenderEmpfFelder: TStringList;
+    FSelectEdepv: TSQLQuery;
+    FEpvArt: Integer;
+    procedure Init(AEpvArt: Integer);
+  protected
+    function PrepareId(AConnection: TecConnection; AKundenExport: IKundenExport; AId: TLongId; AExpImpManager: TExpImpObjectManager): boolean; override;
+    procedure AddMpidNummerCol(AColName: String);
+  public
+    function GetNewColumnValue(ATable: TTAbleObj; AColumn:TColumnObj; AKundenImport: IKundenImport; Var ANewValue: String; AForInsert: Boolean):Boolean; override;
+    constructor Create(AOwner: TExpImpObjectManager; ATable: String; ATableIdMapping: TelStringObjectMap<TTableIdMapping>; ANachrichtenformat: TNachrichtenFormat); reintroduce;
+    constructor CreateWithoutEpvArt(AOwner: TExpImpObjectManager; ATable: String; ATableIdMapping: TelStringObjectMap<TTableIdMapping>);
+    destructor Destroy; override;
+  end;
+
+  TExportEDREMP = class(TExportEdNachrichtEpv)
+  public
+    constructor Create(AOwner: TExpImpObjectManager; ATableIdMapping: TelStringObjectMap<TTableIdMapping>);
+    function GetNewColumnValue(ATable: TTAbleObj; AColumn:TColumnObj; AKundenImport: IKundenImport; Var ANewValue: String; AForInsert: Boolean):Boolean; override;
+  end;
+
+  TExportEDINV = class(TExportEdNachrichtEpv)
+  private
+    FSelectEdremp,
+    FSelectEdNachricht: TSQLQuery;
+  protected
+    function PrepareId(AConnection: TecConnection; AKundenExport: IKundenExport; AId: TLongId; AExpImpManager: TExpImpObjectManager): boolean; override;
+  public
+    constructor Create(AOwner: TExpImpObjectManager; ATableIdMapping: TelStringObjectMap<TTableIdMapping>);
+    destructor Destroy; override;
+    function GetNewColumnValue(ATable: TTAbleObj; AColumn:TColumnObj; AKundenImport: IKundenImport; Var ANewValue: String; AForInsert: Boolean):Boolean; override;
+
+    function DoInitialSelectByZptIds(AConnection: TecConnection; AMndId: Integer; AZptIds: TelSimpleLongIdList): Integer;
+    function DoInitialSelectByMlkIds(AConnection: TecConnection; AMndId: Integer; AMlkIds: TelSimpleLongIdList): Integer;
+  end;
+
+  TExportEDORD = class(TExportEdNachrichtEpv)
+  private
+    FSelectEdNachricht: TSQLQuery;
+  protected
+    function PrepareId(AConnection: TecConnection; AKundenExport: IKundenExport; AId: TLongId; AExpImpManager: TExpImpObjectManager): boolean; override;
+  public
+    constructor Create(AOwner: TExpImpObjectManager; ATableIdMapping: TelStringObjectMap<TTableIdMapping>);
+    destructor Destroy; override;
+    function GetNewColumnValue(ATable: TTAbleObj; AColumn:TColumnObj; AKundenImport: IKundenImport; Var ANewValue: String; AForInsert: Boolean):Boolean; override;
+
+    function DoInitialSelectByZptIds(AConnection: TecConnection; AMndId: Integer; AZptIds: TelSimpleLongIdList): Integer;
+    function DoInitialSelectByMlkIds(AConnection: TecConnection; AMndId: Integer; AMlkIds: TelSimpleLongIdList): Integer;
+  end;
+
+  TExportEDCTR = class(TExportEdNachrichtEpv)
+  public
+    constructor Create(AOwner: TExpImpObjectManager; ATableIdMapping: TelStringObjectMap<TTableIdMapping>);
+    function GetNewColumnValue(ATable: TTAbleObj; AColumn:TColumnObj; AKundenImport: IKundenImport; Var ANewValue: String; AForInsert: Boolean):Boolean; override;
+    function CanDoImport(ATable: TTAbleObj; AKundenImport: IKundenImport): Boolean; override;
+  end;
+
+  TExportEDMSZP = class(TExportEdNachrichtEpv)
+  public
+    constructor Create(AOwner: TExpImpObjectManager; ATableIdMapping: TelStringObjectMap<TTableIdMapping>);
+    function GetNewColumnValue(ATable: TTAbleObj; AColumn:TColumnObj; AKundenImport: IKundenImport; Var ANewValue: String; AForInsert: Boolean):Boolean; override;
+  end;
+
+  TExportEDDAT = class(TExportEdNachrichtEpv)
+  protected
+    function PrepareId(AConnection: TecConnection; AKundenExport: IKundenExport; AId: TLongId; AExpImpManager: TExpImpObjectManager): Boolean; override;
+  public
+    constructor Create(AOwner: TExpImpObjectManager; ATableIdMapping: TelStringObjectMap<TTableIdMapping>);
+    function GetNewColumnValue(ATable: TTAbleObj; AColumn:TColumnObj; AKundenImport: IKundenImport; Var ANewValue: String; AForInsert: Boolean):Boolean; override;
+  end;
+
+  TExportEDREM = class(TExportEdNachrichtEpv)
+  private
+    FSelectEdNachricht: TSQLQuery;
+  protected
+    function PrepareId(AConnection: TecConnection; AKundenExport: IKundenExport; AId: TLongId; AExpImpManager: TExpImpObjectManager): boolean; override;
+  public
+    constructor Create(AOwner: TExpImpObjectManager; ATableIdMapping: TelStringObjectMap<TTableIdMapping>);
+    destructor Destroy; override;
+    function GetNewColumnValue(ATable: TTAbleObj; AColumn:TColumnObj; AKundenImport: IKundenImport; Var ANewValue: String; AForInsert: Boolean):Boolean; override;
+  end;
+
+  TExportEDMSC = class(TExportEdNachrichtEpv)
+  private
+    FSelectEdNachricht: TSQLQuery;
+  protected
+    function PrepareId(AConnection: TecConnection; AKundenExport: IKundenExport; AId: TLongId; AExpImpManager: TExpImpObjectManager): boolean; override;
+  public
+    constructor Create(AOwner: TExpImpObjectManager; ATableIdMapping: TelStringObjectMap<TTableIdMapping>);
+    destructor Destroy; override;
+    function GetNewColumnValue(ATable: TTAbleObj; AColumn:TColumnObj; AKundenImport: IKundenImport; Var ANewValue: String; AForInsert: Boolean):Boolean; override;
+  end;
+
+  TExportEDUTLV = class(TExportEdNachrichtEpv)
+  private
+    FSelectEdNachricht: TSQLQuery;
+  protected
+    function PrepareId(AConnection: TecConnection; AKundenExport: IKundenExport; AId: TLongId; AExpImpManager: TExpImpObjectManager): boolean; override;
+  public
+    function GetNewColumnValue(ATable: TTAbleObj; AColumn:TColumnObj; AKundenImport: IKundenImport; Var ANewValue: String; AForInsert: Boolean):Boolean; override;
+    constructor Create(AOwner: TExpImpObjectManager; ATableIdMapping: TelStringObjectMap<TTableIdMapping>);
+    destructor Destroy; override;
+  end;
+
+  TExportEDUTL = class(TExportEdNachrichtEpv)
+  private
+    FSelectEdNachricht: TSQLQuery;
+  protected
+    function PrepareId(AConnection: TecConnection; AKundenExport: IKundenExport; AId: TLongId; AExpImpManager: TExpImpObjectManager): boolean; override;
+  public
+    constructor Create(AOwner: TExpImpObjectManager; ATableIdMapping: TelStringObjectMap<TTableIdMapping>);
+    destructor Destroy; override;
+  end;
+
+  TExportEDUTZP = class(TExportEdNachrichtEpv)
+  private
+    FSelectTreIdSreId: TSQLQuery;
+  protected
+    function PrepareId(AConnection: TecConnection; AKundenExport: IKundenExport; AId: TLongId; AExpImpManager: TExpImpObjectManager): boolean; override;
+  public
+    function DoInitialSelectByMlkIds(AConnection: TecConnection; AMndId: Integer; AMlkIds: TelSimpleLongIdList): Integer;
+    function DoInitialSelectByZptIds(AConnection: TecConnection; AMndId: Integer; AZptIds: TelSimpleLongIdList): Integer;
+
+    function GetNewColumnValue(ATable: TTAbleObj; AColumn:TColumnObj; AKundenImport: IKundenImport; Var ANewValue: String; AForInsert: Boolean):Boolean; override;
+    constructor Create(AOwner: TExpImpObjectManager; ATableIdMapping: TelStringObjectMap<TTableIdMapping>);
+    destructor Destroy; override;
+  end;
+
+  TExportENLOKSA = class(TExpImpTableObj)
+  private
+    FSelectENLOKSO: TSQLQuery;
+  protected
+     function PrepareId(AConnection: TecConnection; AKundenExport: IKundenExport; AId: TLongId; AExpImpManager: TExpImpObjectManager): boolean; override; // LokSo mit selektieren
+  public
+    constructor Create(AOwner: TExpImpObjectManager; ATableIdMapping: TelStringObjectMap<TTableIdMapping>);
+    destructor Destroy; override;
+  end;
+
+  TExportENLOKB = class(TExpImpTableObj)
+  public
+    constructor Create(AOwner: TExpImpObjectManager; ATableIdMapping: TelStringObjectMap<TTableIdMapping>);
+    function DoInitialSelectByAbnIds(AConnection: TecConnection; AAbnIds: TelSimpleLongIdList): Integer;
+  end;
+
+  TExportENLOKBE = class(TExpImpTableObj)
+  private
+   FSelectLokSo: TSQLQuery;
+  protected
+    // Selektiert indirekt die ZPT_IDS ... mit
+    function PrepareId(AConnection: TecConnection; AKundenExport: IKundenExport; AId: TLongId; AExpImpManager: TExpImpObjectManager): boolean; override;
+  public
+    constructor Create(AOwner: TExpImpObjectManager; ATableIdMapping: TelStringObjectMap<TTableIdMapping>);
+    destructor Destroy; override;
+  end;
+
+  TExportENKZB = class(TExpImpTableObj)
+  private
+    FSelectEdepv: TSQLQuery;
+  protected
+    function PrepareId(AConnection: TecConnection; AKundenExport: IKundenExport; AId: TLongId; AExpImpManager: TExpImpObjectManager): boolean; override;
+  public
+    function DoInitialSelectByKndIds(AConnection: TecConnection; AMndId: Integer; AKndIds: TelSimpleLongIdList): Integer;
+    constructor Create(AOwner: TExpImpObjectManager; ATableIdMapping: TelStringObjectMap<TTableIdMapping>);
+    destructor Destroy; override;
+  end;
+
+  TExportENKZE = class(TExpImpTableObj)
+  private
+    FSelectKze,
+    FSelectEdepv: TSQLQuery;
+  protected
+    function PrepareId(AConnection: TecConnection; AKundenExport: IKundenExport; AId: TLongId; AExpImpManager: TExpImpObjectManager): boolean; override;
+  public
+    function DoInitialSelectByKndIds(AConnection: TecConnection; AMndId: Integer; AKndIds: TelSimpleLongIdList): Integer;
+    constructor Create(AOwner: TExpImpObjectManager; ATableIdMapping: TelStringObjectMap<TTableIdMapping>);
+    destructor Destroy; override;
+  end;
+
+  TExportEdepv = class(TExpImpTableObj)
+  private
+    FEpvArt2Obj: TelIntegerObjectMap<TExpImpTableObj>;
+  public
+    constructor Create(AOwner: TExpImpObjectManager; ATableIdMapping: TelStringObjectMap<TTableIdMapping>);
+    function GetNewColumnValue(ATable: TTAbleObj; AColumn:TColumnObj; AKundenImport: IKundenImport; Var ANewValue: String; AForInsert: Boolean):Boolean; override;
+    procedure RegisterEpvArtObj(AObj: TExpImpTableObj; AEpvArt: Integer);
+
+    function CanDoImport(ATable: TTAbleObj; AKundenImport: IKundenImport): Boolean; override;
+    destructor Destroy; override;
+  end;
+
+  TExportEDULRefReplace = class(TExpImpTableObj)
+  public
+    function GetNewColumnValue(ATable: TTAbleObj; AColumn:TColumnObj; AKundenImport: IKundenImport; Var ANewValue: String; AForInsert: Boolean):Boolean; override;
+    class function DoGetNewColumnValue(ATable: TTAbleObj; AColumn:TColumnObj; AKundenImport: IKundenImport; Var ANewValue: String; AForInsert: Boolean):Boolean;
+  end;
+
+  TExportENZptAbh = class(TExpImpTableObj)
+  private
+    FZptIdFieldNames: TStringList;
+  public
+    constructor Create(AOwner: TExpImpObjectManager; ATableName: String; ATableIdMapping: TelStringObjectMap<TTableIdMapping>; AZptIdFieldName: String = 'ZPT_ID'); reintroduce;
+    function DoInitialSelectByZptIds(AConnection: TecConnection; AMndId: Integer; AZptIds: TelSimpleIntegerList): Integer;
+    function AddZptIdFieldName(AZptIdFieldName: String):TExportENZptAbh;
+    destructor Destroy; override;
+  end;
+
+  TExportENTRE = class(TExpImpTableObj)
+  private
+    FSelectSreUndAbn: TSQLQuery;
+  protected
+    // Selektiert indirekt die ABN_ID und die SRE_IDs mit
+    function PrepareId(AConnection: TecConnection; AKundenExport: IKundenExport; AId: TLongId; AExpImpManager: TExpImpObjectManager): boolean; override;
+  public
+    constructor Create(AOwner: TExpImpObjectManager; ATableIdMapping: TelStringObjectMap<TTableIdMapping>);
+    function GetNewColumnValue(ATable: TTAbleObj; AColumn:TColumnObj; AKundenImport: IKundenImport; Var ANewValue: String; AForInsert: Boolean):Boolean; override;
+
+    function DoInitialSelectByZptIds(AConnection: TecConnection; AMndId: Integer; AZptIds: TelSimpleLongIdList): Integer;
+    function DoInitialSelectByMlkIds(AConnection: TecConnection; AMndId: Integer; AMlkIds: TelSimpleLongIdList): Integer;
+    destructor Destroy; override;
+  end;
+
+  TExportENSRE = class(TExpImpTableObj)
+  private
+    FSelectAbn: TSQLQuery;
+  protected
+    // Selektiert indirekt die ABN_ID
+    function PrepareId(AConnection: TecConnection; AKundenExport: IKundenExport; AId: TLongId; AExpImpManager: TExpImpObjectManager): boolean; override;
+  public
+    constructor Create(AOwner: TExpImpObjectManager; ATableIdMapping: TelStringObjectMap<TTableIdMapping>);
+    destructor Destroy; override;
+    function GetNewColumnValue(ATable: TTAbleObj; AColumn:TColumnObj; AKundenImport: IKundenImport; Var ANewValue: String; AForInsert: Boolean):Boolean; override;
+    function DoInitialSelectByAbnIds(AConnection: TecConnection; AAbnIds: TelSimpleLongIdList): Integer;
+  end;
+
+  TExportEDQUO = class(TExportEdNachrichtEpv)
+  private
+    FSelectEdNachricht: TSQLQuery;
+  protected
+    function PrepareId(AConnection: TecConnection; AKundenExport: IKundenExport; AId: TLongId; AExpImpManager: TExpImpObjectManager): boolean; override;
+  public
+    constructor Create(AOwner: TExpImpObjectManager; ATableIdMapping: TelStringObjectMap<TTableIdMapping>);
+    destructor Destroy; override;
+    function GetNewColumnValue(ATable: TTAbleObj; AColumn:TColumnObj; AKundenImport: IKundenImport; Var ANewValue: String; AForInsert: Boolean):Boolean; override;
+
+    function DoInitialSelectByMlkIds(AConnection: TecConnection; AMndId: Integer; AMlkIds: TelSimpleLongIdList): Integer;
+  end;
+
+  TExportENSDAK = class(TExpImpTableObj)
+  public
+    constructor Create(AOwner: TExpImpObjectManager; ATableIdMapping: TelStringObjectMap<TTableIdMapping>);
+    function DoInitialSelectByZptIds(AConnection: TecConnection; AMndId: Integer; AZptIds: TelSimpleLongIdList): Integer;
+    destructor Destroy; override;
+  end;
+
+  TExportENNWS = class(TExpImpTableObj)
+  public
+    constructor Create(AOwner: TExpImpObjectManager; ATableIdMapping: TelStringObjectMap<TTableIdMapping>);
+    destructor Destroy; override;
+    function GetNewColumnValue(ATable: TTAbleObj; AColumn: TColumnObj; AKundenImport: IKundenImport; Var ANewValue: String; AForInsert: Boolean): Boolean; override;
+  end;
+
+  TExportENNWM = class(TExpImpTableObj)
+  private
+    FSelectNwsId: TSQLQuery;
+  protected
+    function PrepareId(AConnection: TecConnection; AKundenExport: IKundenExport; AId: TLongId; AExpImpManager: TExpImpObjectManager): boolean; override;
+  public
+    constructor Create(AOwner: TExpImpObjectManager; ATableIdMapping: TelStringObjectMap<TTableIdMapping>);
+    destructor Destroy; override;
+    function DoInitialSelectByMlkIds(AConnection: TecConnection; AMndId: Integer; AMlkIds: TelSimpleLongIdList): Integer;
+  end;
+
+  TExpImpObjectManager = class(TelObjectList<TExpImpTableObj>)
+  private
+    FObjEDINV: TExportEDINV;
+    FObjENKZB: TExportENKZB;
+    FObjENKZE: TExportENKZE;
+    FObjEDQUO: TExportEDQUO;
+    FObjEdepv: TExportEdepv;
+    FObjEdepr: TExpImpTableObj;
+    FObjENLOKB: TExportENLOKB;
+    FObjENSRE: TExportENSRE;
+    FObjENTRE: TExportENTRE;
+    FObjEDUTZP: TExportEDUTZP;
+    FObjENSDAK: TExportENSDAK;
+    FObjEDORD: TExportEDORD;
+    FObjENNWM: TExportENNWM;
+
+    FOwnsExportOptionen: Boolean;
+    FOwnsImportOptionen: Boolean;
+    FExportOptionen: TExportOptionen;
+    FImportOptionen: TImportOptionen;
+    procedure ExportEnabledAnChildsKopieren;
+    procedure FillParents;
+
+  public
+    function GetItemByIdentifier(AIdentifier: String):TExpImpTableObj;
+
+    Function AddTable(ATableObj: TExpImpTableObj):TExpImpTableObj; overload;
+    Function AddTable(ATable: String; ATableIdMapping: TelStringObjectMap<TTableIdMapping>): TExpImpTableObj; overload;
+
+    procedure CheckChilds;
+    procedure Initialize(AExportOptionen: TExportOptionen; AImportOptionen: TImportOptionen; ATableIdMapping: TelStringObjectMap<TTableIdMapping>);
+    procedure InitTables(ATables: TTablesObj);
+    destructor Destroy; override;
+
+
+    property ExportOptionen: TExportOptionen read FExportOptionen;
+    property ImportOptionen: TImportOptionen read FImportOptionen;
+    property ObjEdepv: TExportEdepv read FObjEdepv;
+    property ObjEdepr: TExpImpTableObj read FObjEdepr;
+
+    // Objekte mit InitialSelects
+    property ObjEDINV: TExportEDINV read FObjEDINV;
+    property ObjENKZB: TExportENKZB read FObjENKZB;
+    property ObjENKZE: TExportENKZE read FObjENKZE;
+    property ObjEDQUO: TExportEDQUO read FObjEDQUO;
+    property ObjENLOKB: TExportENLOKB read FObjENLOKB;
+    property ObjENSRE: TExportENSRE read FObjENSRE;
+    property ObjENTRE: TExportENTRE read FObjENTRE;
+    property ObjEDUTZP: TExportEDUTZP read FObjEDUTZP;
+    property ObjENSDAK: TExportENSDAK read FObjENSDAK;
+    property ObjEDORD: TExportEDORD read FObjEDORD;
+    property ObjENNWM: TExportENNWM read FObjENNWM;
+  end;
+
+implementation
+
+uses
+  Controls, Kundenabrechnung.ProduktImpExp, EnergyBasics.Version,
+  SystemCore.HierarchieManager, GPObjectModel, JclCompression, SystemCore.CommonFunctions,
+  EnergyLibrary.Types, SystemCore.DBFunctions, EnergyBasics.EnsuredExec.Constants,
+  SystemCore.DBModel.Utils, SystemCore.Constants, EnergyModuleBase.Constants, Math, Lib32SQLDebugFrm, Lib32DebugFrm;
+
+
+{ TExpImpTableObj }
+
+function TExpImpTableObj.AddChildTable(AChildTable: String): TExpImpTableObj;
+begin
+  if FChildTables.IndexOf(AChildTable) < 0 then
+    FChildTables.Add(AChildTable)
+  else
+   raise Exception.Create('Interner Fehler: ' + AChildTable + ' wurde bereits hinzugefügt!!');
+  result := self;
+end;
+
+function TExpImpTableObj.SelectIdForExport(AQry: TSQLQuery; ASelectedBy, AFieldName: String): Boolean;
+begin
+  result := false;
+  if not FCanDoExport then
+    exit;
+
+  if AFieldName = '' then
+    AFieldName := FIdFeldName;
+
+  result := SelectIdForExport(AQry.fieldbyName(AFieldName).AsLongId, ASelectedBy)
+end;
+
+function TExpImpTableObj.SelectIdForExport(AId: TLongId; ASelectedBy: String): Boolean;
+begin
+  result := false;
+  if not FCanDoExport then
+    exit;
+
+  if AId.IsNull then
+    exit;
+
+  if FIdsSelektiert.Contains(AId) then
+    exit;
+
+  FIdsSelektiert.Add(AId);
+  if FOwner.ExportOptionen.IsExportXmlDebug then
+  begin
+    FIdsSelektiertDebug.AddObject(AId, ASelectedBy);
+    TfrmLib32Debug.AddText(TableName + ': ' + aId.ToStr + ' hinzugefügt wg. ' + ASelectedBy);
+  end;
+  result := true;
+end;
+
+procedure TExpImpTableObj.AddImportValues(ATable: TTAbleObj);
+begin
+  if (ATable.Tablename = TableName) then
+    FImportValues.Add(ATable);
+end;
+
+procedure TExpImpTableObj.AnonymisiereFeldWert(AColumn: TColumnObj);
+begin
+end;
+
+function TExpImpTableObj.CanDoImport(ATable: TTAbleObj; AKundenImport: IKundenImport): Boolean;
+begin
+  result := not ATable.ImportErledigt;
+end;
+
+function TExpImpTableObj.CheckObSchonExportiert(ATableName: String; Qry: TSQLQuery;
+  AMndKndIdListe: TelSimpleLongIdList): Boolean;
+  var ColumnsRef: TStrings;
+    i: Integer;
+begin
+  result := false;
+  if not CanDoExport then
+    exit;
+
+  if ATableName = TableName then
+    result := SelectIdForExport(qry.FieldByName(DefaultFieldName).AsLongId, GetSqlDebugInfo(qry))
+  else
+  begin
+    result := false;
+    ColumnsRef := TStringList.Create;
+    try
+      if GetRefColumns(ATableName, ColumnsRef) then
+      begin
+         for i := 0 to ColumnsRef.Count - 1 do
+           if SelectIdForExport(qry.FieldByName(ColumnsRef[i]).AsLongId, GetSqlDebugInfo(qry)) then
+             result := true;
+       end;
+    finally
+      ColumnsRef.Free;
+    end;
+  end;
+end;
+
+procedure TExpImpTableObj.Clear;
+begin
+  FIdsSelektiert.Clear;
+  FIdsPrepared.Clear;
+  FIdsChildSelected.Clear;
+  if FOwnsTableIdMapping then
+    FTableIdMapping.Clear;
+end;
+
+constructor TExpImpTableObj.Create(AOwner: TExpImpObjectManager; ATable: String; ATableIdMapping: TelStringObjectMap<TTableIdMapping>; AIdentifier: String = '');
+var idx: Integer;
+     seq: String;
+
+begin
+  if AIdentifier = '' then
+    AIdentifier := ATable;
+  FParents := TelObjectList<TExpImpTableObj>.create(false);
+  FOwner := AOwner;
+  FAutoPrepareParentIds := false;
+  FAutoSelectChildIds := true;
+
+  FTableName := ATable;
+  FCanDoImport := true;
+  FCanDoExport := true;
+
+  seq := '';
+  FDTable := TDBModelUtils.GetTables.Find(TableName);
+  if FDTable = nil then
+    raise EInvalidOperation.Create('Tabelle ' + ATable + ' nicht in DB-Modell gefunden');
+
+  if FDTable.PKFieldsCount <> 1 then
+    raise EInvalidOperation.Create('Tabelle ' + ATable + ' hat mehr als einen PK');
+
+  FIdentifier := AIdentifier;
+  for idx := 0 to FDTable.Columns.Count - 1 do
+    if FDTable.Columns[idx].PrimaryKey then
+    begin
+      FIdFeldName := FDTable.Columns[idx].Name;
+      break;
+    end;
+
+  seq :=  DBModel.FindSequence(FDTable.Schema, FDTable.Name);
+  if (ATableIdMapping <> nil) then
+    FTableIdMapping := ATableIdMapping.Values[ATable]
+  else
+    FTableIdMapping := nil;
+
+  FOwnsTableIdMapping := ATableIdMapping = nil;
+  if FTableIdMapping = nil then
+  begin
+    FTableIdMapping := TTableIdMapping.Create(ATable, FIdFeldName, Seq);
+    if ATableIdMapping <> nil  then
+      ATableIdMapping.AddObject(ATable, FTableIdMapping);
+  end;
+
+  FIdsSelektiert := TelSimpleLongIdList.Create;
+  FIdsChildSelected := TelSimpleLongIdList.Create;
+  FChildTables := TStringList.Create;;
+  FIdsPrepared := TelSimpleLongIdList.Create;
+  FImportValues := TelObjectList<TTAbleObj>.Create(false);
+  FIdsSelektiertDebug := TelLongIdStringMap.Create;
+
+  FImportNachlauf := TelObjectList<TTAbleObj>.Create(false);
+end;
+
+destructor TExpImpTableObj.Destroy;
+begin
+  FIdsSelektiertDebug.Free;
+  FIdsSelektiert.Free;
+  FChildTables.Free;
+  FIdsPrepared.Free;
+  FIdsChildSelected.Free;
+  if FOwnsTableIdMapping then
+    FTableIdMapping.Free;
+  FImportValues.Free;
+  FImportNachlauf.Free;
+  FParents.Free;
+  inherited;
+end;
+
+function TExpImpTableObj.DisableImport: TExpImpTableObj;
+begin
+  FCanDoImport := false;
+  result := self;
+end;
+
+procedure TExpImpTableObj.DoImportNacharbeiten(AConnection: TecConnection; AKundenImport: IKundenImport);
+var
+  i,j: Integer;
+  dbColumn: TDBModelColumn;
+  tableDts: TTableObj;
+  tabCol: TColumnObj;
+  id, orgValue: int64;
+  sql, pkValue: String;
+begin
+  for i := 0 to FImportNachlauf.Count - 1 do
+  begin
+    tableDts := FImportNachlauf[i];
+    sql := '';
+    for j := 0 to tableDts.Columns.Count - 1 do
+    begin
+      tabCol := tableDts.Columns[j];
+      dbColumn := FDTable.Columns.Find(tabCol.Columnname);
+
+      if dbColumn.PrimaryKey then
+      begin
+        orgValue := StrToInt64Def(tabCol.Value, NULL_INTEGER);
+        if (TableIdMapping.IdMapping.TryGetValue(orgValue, id)) then
+        begin
+          pkValue := IntToStr(id);
+          continue;
+        end;
+
+        if FOwner.FImportOptionen.FehlerIgnorieren then
+          AKundenImport.AddLog('DoImportNacharbeiten: PkSpalte "' + tabCol.Columnname + '" mit Wert "' + tabCol.Value + '" ist nicht auflösbar --> Kein Update auf FKs')
+        else
+          raise Exception.Create('DoImportNacharbeiten: PkSpalte "' + tabCol.Columnname + '" mit Wert "' + tabCol.Value + '" ist nicht auflösbar --> Kein Update auf FKs');
+        sql := '';
+        break;
+      end;
+
+      if (tabCol.Value = '') then
+        continue;
+
+      if not TableIdMapping.IsRelevant(tableDts.Tablename, tabCol.Columnname) then
+        continue;
+
+      if not IsSelbstreferenzierendeSpalte(dbColumn) then
+        continue;
+
+      orgValue := StrToInt64Def(tabCol.Value, NULL_INTEGER);
+      if (TableIdMapping.IdMapping.TryGetValue(orgValue, id)) then
+      begin
+        if (sql <> '') then
+          sql := sql + ', ';
+        sql := sql + dbColumn.Name + ' = ' + IntToStr(id)  + CR_LF;
+        continue;
+      end;
+
+      if FOwner.FImportOptionen.FehlerIgnorieren then
+        AKundenImport.AddLog('DoImportNacharbeiten: Spalte "' + tabCol.Columnname + '" mit Wert "' + tabCol.Value + '" ist nicht auflösbar --> NULL bleibt')
+      else
+        raise Exception.Create('DoImportNacharbeiten: Spalte "' + tabCol.Columnname + '" mit Wert "' + tabCol.Value + '" ist nicht auflösbar');
+    end;
+
+    if (sql <> '') then
+    begin
+      sql := 'UPDATE CREATOR.' + FDTable.Name + CR_LF +
+             ' SET ' + sql +
+             'WHERE ' + FIdFeldName + ' = ' + pkValue;
+      AConnection.ExecuteDirect(sql);
+    end;
+  end;
+end;
+
+function TExpImpTableObj.DoInitialSelect(AConnection: TecConnection; ASql, AIdParamName: String;
+  AIdListe: TelSimpleLongIdList; ADoMore: TVerarbeiteQueryProc): Integer;
+var qry: TSqlQuery;
+    i: integer;
+begin
+  result := 0;
+  qry := AConnection.CreateSQLQuery;
+  try
+    qry.SQL.Text := ASql;
+    qry.DBPrepare;
+    if not AnsiContainsText(Asql, FIdFeldName) then
+    begin
+      if DebugHook > 0 then
+        raise Exception.Create('DoInitialSelect, ' + TableName + ': Das Feld ' + FIdFeldName + ' ist nicht im Sql enthalten: ' +  CR_LF + ASql);
+      exit;
+    end;
+
+    for i := 0 to AIdListe.Count - 1 do
+    begin
+      qry.ParamByName(AIdParamName).AsLongId := AIdListe[i];
+      try
+        qry.Open;
+        while not qry.Eof do
+        begin
+          if SelectIdForExport(qry.FieldByName(FIdFeldName).AsLongId, ASql + ' [' + AIdParamName + '=' + AIdListe[i].ToStr + ']') then
+            inc(result);
+          if assigned(ADoMore) then
+            ADoMore(qry);
+          qry.Next;
+        end;
+      finally
+        qry.Close;
+      end;
+    end;
+  finally
+    qry.Free;
+  end;
+end;
+
+function TExpImpTableObj.DoInitialSelect(AConnection: TecConnection; ASql, AIdParamName: String;
+  AIdListe: TelSimpleIntegerList; ADoMore: TVerarbeiteQueryProc): Integer;
+var i: integer;
+    lIdListe:  TelSimpleLongIdList;
+begin
+  lIdListe := TelSimpleLongIdList.Create(AIdListe.Count);
+  try
+    for i := 0 to AIdListe.Count - 1 do
+      lIdListe.Add(TLongId.From(AIdListe[i]));
+    result := DoInitialSelect(AConnection, ASql, AIdParamName, lIdListe, ADOmORE);
+  finally
+    lIdListe.Free;
+  end;
+end;
+
+procedure TExpImpTableObj.PrepareImport(AConnection: TecConnection; AKundenImport: IKundenImport);
+begin
+  SortImportValues;
+end;
+
+function TExpImpTableObj.SetAutoSelectChildIds(AValue: Boolean): TExpImpTableObj;
+begin
+  FAutoSelectChildIds := AValue;
+  result := Self;
+end;
+
+function TExpImpTableObj.SetExportEnabled(AValue: Boolean): TExpImpTableObj;
+begin
+  FCanDoExport := AValue;
+  result := Self;
+end;
+
+function TExpImpTableObj.SetImportEnabled(AValue: Boolean): TExpImpTableObj;
+begin
+  FCanDoExport := AValue;
+  Result := Self;
+end;
+
+function TExpImpTableObj.GetIdDebugInfo(AId: TLongId): String;
+begin
+  result := '';
+  if FOwner.ExportOptionen.IsExportXmlDebug and FIdsSelektiertDebug.ContainsKey(aid) then
+    result := FIdsSelektiertDebug.Values[AId]
+end;
+
+function TExpImpTableObj.GetNewColumnValue(ATable: TTAbleObj; AColumn:TColumnObj; AKundenImport: IKundenImport;
+    Var ANewValue: String; AForInsert: Boolean):Boolean;
+var id, orgValue: int64;
+    dbColumn: TDBModelColumn;
+
+begin
+  result := False;
+  ANewValue := AColumn.Value;
+  if AColumn.Value = '' then
+    exit;
+
+  orgValue := StrToInt64Def(AColumn.Value, NULL_INTEGER);
+  if orgValue = NULL_INTEGER then
+    exit;
+
+  if TableIdMapping.IsRelevant(ATable.Tablename, AColumn.Columnname) then
+  begin
+    if (TableIdMapping.IdMapping.TryGetValue(orgValue, id)) then
+    begin
+      result := true;
+      ANewValue := IntToStr(id);
+      exit;
+    end;
+
+    if not AForInsert then
+      exit;
+
+    dbColumn := FDTable.Columns.Find(AColumn.Columnname);
+    if IsSelbstreferenzierendeSpalte(dbColumn) then
+    begin
+      if not dbColumn.Nullable then
+         raise Exception.Create('GetNewColumnValue: Selbstreferenzierte Spalte "' + AColumn.Columnname + '" ist nicht Nullable');
+      if FImportNachlauf.IndexOf(ATable) < 0 then
+          FImportNachlauf.Add(ATable);
+      ANewValue := '';
+      result := true;
+      exit;
+    end;
+
+    if FOwner.FImportOptionen.FehlerIgnorieren then
+      AKundenImport.AddLog('GetNewColumnValue: Spalte "' + AColumn.Columnname + '" mit Wert "' + AColumn.Value + '" ist nicht auflösbar --> NULL importiert')
+    else
+      raise Exception.Create('GetNewColumnValue: Spalte "' + AColumn.Columnname + '" mit Wert "' + AColumn.Value + '" ist nicht auflösbar');
+  end;
+end;
+
+procedure TExpImpTableObj.SortImportValues;
+
+var orgValue: int64;
+    tabIdx, colIdx: Integer;
+    table: TTAbleObj;
+    col: TColumnObj;
+    columnsRef: TStrings;
+    refTables: TelObjectList<TTAbleObj>;
+
+begin
+  columnsRef := TStringList.Create;
+  refTables := TelObjectList<TTAbleObj>.Create(false);
+  try
+    if GetRefColumns(TableName, columnsRef) then
+    begin
+      for tabIdx := FImportValues.Count - 1 downto 0 do
+      begin
+        table := FImportValues[tabIdx];
+        for colIdx := 0 to columnsRef.Count - 1 do
+        begin
+          col := table.Columns[colIdx];
+          orgValue := StrToInt64Def(col.Value, NULL_INTEGER);
+          if orgValue <> NULL_INTEGER then
+          begin
+            refTables.Add(table);
+            FImportValues.Remove(table);
+            break;
+          end;
+        end;
+      end;
+    end;
+
+    FImportValues.SortList(
+          function(Item1, Item2: Pointer): Integer
+          var
+            id1, id2: Int64;
+          begin
+            Result := 0;
+            if (TObject(Item1) is TTAbleObj) and (TObject(Item2) is TTAbleObj) then begin
+              id1 := StrToInt64Def(TTAbleObj(Item1).GetColumnByName(FIdFeldName).Value, NULL_INTEGER);
+              id2 := StrToInt64Def(TTAbleObj(Item2).GetColumnByName(FIdFeldName).Value, NULL_INTEGER);
+              Result := CompareValue(id1, id2);
+            end;
+          end);
+
+    if refTables.Count > 0 then
+    begin
+      RefTables.SortList(function(Item1, Item2: Pointer): Integer
+            var
+              id1, id2: Int64;
+            begin
+              Result := 0;
+              if (TObject(Item1) is TTAbleObj) and (TObject(Item2) is TTAbleObj) then begin
+                id1 := StrToInt64Def(TTAbleObj(Item1).GetColumnByName(FIdFeldName).Value, NULL_INTEGER);
+                id2 := StrToInt64Def(TTAbleObj(Item2).GetColumnByName(FIdFeldName).Value, NULL_INTEGER);
+                Result := CompareValue(id1, id2);
+              end;
+            end);
+
+      FImportValues.AddRange(refTables);
+    end;
+
+  finally
+    refTables.Free;
+    columnsRef.Free;
+  end;
+end;
+
+function TExpImpTableObj.GetRefColumns(ATableName: string; AColumnsRef: TStrings): Boolean;
+var i: Integer;
+begin
+  result := false;
+  for i := 0 to FDTable.ReferencedBy.Count - 1 do
+    if FDTable.ReferencedBy[i].FKTableSchema + '.' + FDTable.ReferencedBy[i].FKTable = ATableName then
+    begin
+      if length(FDTable.ReferencedBy[i].FKFieldnames) <> 1 then
+          raise EInvalidOperation.Create('length(FDTable.ReferencedBy[i].FKFieldnames) <> 1  wird nicht unterstützt!');
+      AColumnsRef.Add(FDTable.ReferencedBy[i].FKFieldnames[0]);
+      result := true;
+    end;
+end;
+
+function TExpImpTableObj.GetSqlDebugInfo(AQuery: TSqlQuery): String;
+var
+  I: Integer;
+begin
+  if FOwner.ExportOptionen.IsExportXmlDebug then
+  begin
+    result := AQuery.SQL.Text;
+    for I := 0 to AQuery.Params.Count - 1 do
+      result := result + CR_LF + AQuery.Params[i].Name + ' = ' + VarToStr(AQuery.Params[i].Value);
+  end
+   else result := '';
+end;
+
+function TExpImpTableObj.HasImportValues: Boolean;
+var idx: Integer;
+begin
+  result := false;
+  if not FCanDoImport then
+   exit;
+
+  for idx := 0 to FImportValues.Count -1 do
+    if not FImportValues[idx].ImportErledigt then
+    begin
+      result := true;
+      break;
+    end;
+end;
+
+function TExpImpTableObj.IsSelbstreferenzierendeSpalte(AColumn: TDBModelColumn): Boolean;
+var
+  ref: TDBModelRef;
+  i, j: Integer;
+begin
+  result := false;
+  if AColumn = nil then
+    exit;
+
+  for i := 0 to FDTable.ReferencesTo.Count - 1 do
+  begin
+    ref := FDTable.ReferencesTo[i];
+    if ref.FKTableSchema + '.' + ref.FKTable <> FTableName then
+      continue;
+    for j := 0 to high(ref.FKSourceFieldnames) do
+      if (ref.FKSourceFieldnames[j] = AColumn.name) then
+      begin
+        result := true;
+        exit;
+      end;
+  end;
+end;
+
+function TExpImpTableObj.PrepareParentId(AConnection: TecConnection;
+      AId: TLongId; AParent: TExpImpTableObj; AColumnName: String): boolean;
+var qry: TSQLQuery;
+begin
+  result := false;
+  qry := AConnection.CreateSQLQuery;
+  try
+    qry.SQL.Text := 'SELECT ' + AColumnName +
+                    ' FROM ' + TableName + ' WHERE ' + FIdFeldName + ' = :IDFELD';
+    qry.DBPrepare;
+    qry.ParamByName('IDFELD').AsLongId := AId;
+    qry.Open();
+    while not qry.Eof do
+    begin
+      if AParent.SelectIdForExport(qry.Fields[0].AsLongId,TableName + ' / ' + FIdFeldName + ' = ' + AId.ToStr) then
+        result := True;
+      qry.Next;
+    end;
+  finally
+    qry.Free;
+  end;
+end;
+
+procedure TExpImpTableObj.PreparePksForImport(AConnection: TecConnection; ATable: TTAbleObj; AKundenImport: IKundenImport);
+var id, orgValue: int64;
+    col: TColumnObj;
+    dbCol: TDBModelColumn;
+begin
+  // PK-Ids setzen
+  col := ATable.GetColumnByName(FIdFeldName, true);
+  orgValue := StrToInt64Def(col.Value, NULL_INTEGER);
+  if orgValue = NULL_INTEGER then
+     raise Exception.Create(TableName + ': PK-Spalte ' + FIdFeldName + ' leer!!');
+
+  dbCol := FDTable.Columns.Find(col.Columnname);
+  if (dbCol = nil) then
+     raise Exception.Create(TableName + ': PK-Spalte ' + FIdFeldName + ' nicht im DB-Modell gefunden!!');
+
+  if not TableIdMapping.IdMapping.TryGetValue(orgValue, id) then
+  begin
+    // Neue ID generieren
+    id := ConnectionPool.GetSequenceValue(TableIdMapping.SequenceName);
+    TableIdMapping.IdMapping.Add(orgValue, id);
+  end;
+end;
+
+function TExpImpTableObj.PrepareId(AConnection: TecConnection; AKundenExport: IKundenExport; AId: TLongId; AExpImpManager: TExpImpObjectManager): boolean;
+var refIdx: Integer;
+    parent: TExpImpTableObj;
+begin
+  result := false;
+  if FAutoPrepareParentIds then
+    for refIdx := 0 to FDTable.ReferencesTo.Count-1 do
+    if length(FDTable.ReferencesTo[refIdx].FKSourceFieldnames) = 1 then
+    begin
+      parent := AExpImpManager.GetItemByIdentifier('CREATOR.' + FDTable.ReferencesTo[refIdx].FKTable);
+      if (parent <> nil) then
+      begin
+        if parent.ChildTables.IndexOf(TableName) >= 0 then
+        begin
+          if PrepareParentId(AConnection, aid, parent, FDTable.ReferencesTo[refIdx].FKSourceFieldnames[0]) then
+              result := True;
+        end;
+      end;
+    end;
+end;
+
+function TExpImpTableObj.PrepareSelectedIds(AConnection: TecConnection; AKundenExport: IKundenExport;
+  AExpImpManager: TExpImpObjectManager): Boolean;
+var idx: Integer;
+    id : TLongId;
+begin
+  result := false;
+  if not CanDoExport then
+    exit;
+
+
+  for idx := 0 to FIdsSelektiert.Count - 1 do
+    if not FIdsPrepared.Contains(FIdsSelektiert[idx]) then
+    begin
+      id := FIdsSelektiert[idx];
+      if PrepareId(AConnection, AKundenExport, id, AExpImpManager) then
+        result := true;
+    end;
+  // IDS selektieren, damit müssten wir 90% der Selbstreferenzierten ID-Sachen erledigt kriegen
+  FIdsSelektiert.Sort(false);
+end;
+
+function TExpImpTableObj.SelectIds(AConnection: TecConnection; AExpImpManager: TExpImpObjectManager):boolean;
+var idx: Integer;
+    child: TExpImpTableObj;
+    baseSql, sql: String;
+    idsChildSelects,
+    idsExport: TelSimpleLongIdList;
+    qry: TSqlQuery;
+begin
+  result := false;
+  if not CanDoExport then
+    exit;
+
+  result := false;
+  if FIdsSelektiert.Count = 0 then
+    exit;
+
+  if FChildTables.Count = 0 then
+    exit;
+
+  if AutoSelectChildIds then
+  begin
+    idsExport := TelSimpleLongIdList.Create();;
+    idsChildSelects := TelSimpleLongIdList.Create();;
+    qry := AConnection.CreateSQLQuery;
+    try
+      for idx := 0 to FIdsSelektiert.Count - 1 do
+        if not FIdsChildSelected.Contains(FIdsSelektiert[idx]) then
+          idsChildSelects.Add(FIdsSelektiert[idx]);
+
+      if idsChildSelects.Count > 0 then
+      begin
+        for idx := 0 to FChildTables.Count - 1 do
+        begin
+          idsExport.AddRange(idsChildSelects);
+          child := AExpImpManager.GetItemByIdentifier(FChildTables[idx]);
+          if child = nil then
+             raise EInvalidOperation.Create('Kein TExpImpTableObj für ' + FChildTables[idx] + ' gefunden!');
+          baseSql := 'SELECT ' + child.DefaultFieldName + ',' + DefaultFieldName + CR_LF +
+                 ' FROM ' + child.TableName + CR_LF +
+                 ' WHERE ' + DefaultFieldName + ' ' + BASISIDLISTTAG;
+          sql :=  GetSqlMitIds(baseSql, idsExport);
+          while sql <> '' do
+          begin
+            qry.SQL.Text := sql;
+            qry.Open();
+            while not qry.Eof do
+            begin
+              if child.SelectIdForExport(qry, 'SelectId/Child by ' + DefaultFieldName + ' = ' + qry.FieldByName(DefaultFieldName).AsString) then
+                  result := true;
+              qry.Next;
+            end;
+            sql := GetSqlMitIds(baseSql, idsExport);
+          end;
+        end;
+        FIdsChildSelected.AddRange(idsChildSelects);
+      end
+    finally
+      idsExport.Free;
+      idsChildSelects.Free;
+      qry.Free;
+    end;
+  end;
+end;
+
+function TExpImpTableObj.SelectOther( AQuery: TSqlQuery; ATableName, AFieldName: String; AConnection: TecConnection; AKundenExport: IKundenExport; AExpImpManager: TExpImpObjectManager): boolean;
+var el: TExpImpTableObj;
+begin
+  if AQuery.FieldByName(AFieldName).IsNull then
+  begin
+    result := false;
+    exit;
+  end;
+
+  el := AExpImpManager.GetItemByIdentifier(ATableName);
+  if el = nil then
+  begin
+    result := false;
+    exit;
+  end;
+  result := el.PrepareId(AConnection, AKundenExport, AQuery.FieldByName(AFieldName).AsLongId, AExpImpManager);
+end;
+
+procedure TExpImpTableObj.SelectExportIds(AConnection: TecConnection; ASql: string);
+var qry: TSqlQuery;
+begin
+  if not FCanDoExport then
+    exit;
+  qry := AConnection.CreateSQLQuery;
+  try
+    qry.SQL.Text := ASql;
+    qry.Open();
+    while not qry.Eof do
+    begin
+      SelectIdForExport(qry, TableName + ' / SelectExportIds / ' + ASql, '');
+      qry.Next;
+    end;
+  finally
+    qry.Free;
+  end;
+end;
+
+{ TExpImpObjectManager }
+
+function TExpImpObjectManager.AddTable(ATable: String; ATableIdMapping: TelStringObjectMap<TTableIdMapping>): TExpImpTableObj;
+begin
+  if GetItemByIdentifier(ATable) <> nil then
+    raise EInvalidOperation.Create('TExpImpObjectManager.AddTable: Es existiert bereits ein Eintrag mit ' + ATable);
+  result := TExpImpTableObj.Create(self, ATable, ATableIdMapping);
+  add(result)
+end;
+
+procedure TExpImpObjectManager.CheckChilds;
+var idx, idx2: Integer;
+begin
+  for idx := 0 to Count - 1 do
+    for idx2 := 0 to Items[idx].FChildTables.Count - 1 do
+      if GetItemByIdentifier(Items[idx].FChildTables[idx2]) = nil  then
+        raise EInvalidOperation.Create('TExpImpObjectManager.CheckChilds / ' + Items[idx].TableName +  ': Kein Eintrag zu Child ' + Items[idx].FChildTables[idx2] + ' gefunden!');
+end;
+
+destructor TExpImpObjectManager.Destroy;
+begin
+  if FOwnsExportOptionen then
+    FExportOptionen.Free;
+
+  if FOwnsImportOptionen then
+    FImportOptionen.Free;
+  inherited;
+end;
+
+function TExpImpObjectManager.AddTable(ATableObj: TExpImpTableObj): TExpImpTableObj;
+begin
+  if GetItemByIdentifier(ATableObj.Identifier) <> nil then
+    raise EInvalidOperation.Create('TExpImpObjectManager.AddTable: Es existiert bereits ein Eintrag mit ' + ATableObj.Identifier);
+  add(ATableObj);
+
+  if ATableObj is TExportEdNachrichtEpv then
+    ObjEdepv.RegisterEpvArtObj(ATableObj, TExportEdNachrichtEpv(ATableObj).FEpvArt);
+  result := ATableObj;
+end;
+
+function TExpImpObjectManager.GetItemByIdentifier(AIdentifier: String): TExpImpTableObj;
+var idx: Integer;
+begin
+  result := nil;
+  for idx := 0 to Count - 1 do
+    if items[idx].Identifier = AIdentifier then
+    begin
+      result := items[idx];
+      break;
+    end;
+end;
+
+procedure TExpImpObjectManager.Initialize(AExportOptionen: TExportOptionen; AImportOptionen: TImportOptionen; ATableIdMapping: TelStringObjectMap<TTableIdMapping>);
+begin
+  Clear;
+
+  if FOwnsExportOptionen then
+  begin
+    FExportOptionen.Free;
+    FExportOptionen := nil;
+  end;
+
+  if AExportOptionen = nil then
+  begin
+    FExportOptionen := TExportOptionen.Create;
+    FOwnsExportOptionen := true;
+  end
+  else
+  begin
+    FExportOptionen := AExportOptionen;
+    FOwnsExportOptionen := false;
+  end;
+
+  if FOwnsImportOptionen then
+  begin
+    FImportOptionen.Free;
+    FImportOptionen := nil;
+  end;
+
+  if AImportOptionen = nil then
+  begin
+    FImportOptionen := TImportOptionen.Create;
+    FOwnsImportOptionen := True;
+  end
+  else
+  begin
+    FImportOptionen := AImportOptionen;
+    FOwnsImportOptionen := false;
+  end;
+
+  // Muss vor allen Nachricht-Objekten registriert sein!
+  FObjEdepv := TExportEdepv(AddTable(TExportEdepv.Create(Self, ATableIdMapping))
+   .SetExportEnabled(FExportOptionen.DoNachrichtenExport)); // UTILMD / INV / MSC / REM
+
+  FObjEdepr := AddTable(EDEPR, ATableIdMapping)
+   .SetExportEnabled(FExportOptionen.DoNachrichtenExport)
+   .SetAutoSelectChildIds(false) // EprIds und EpvIds müssen direkt selektiert werden!
+   .AddChildTable(EDEPV);
+
+  FObjENKZB := TExportENKZB.Create(self, ATableIdMapping);
+  AddTable(FObjENKZB)
+    .AddChildTable(ENKZBZ);
+
+  AddTable(ENKZBZ, ATableIdMapping)
+    .AddChildTable(ENKZBB)
+    .AddChildTable(ENAPP)
+    .AddChildTable(ENSPK);
+
+  AddTable(ENKZBB, ATableIdMapping);
+  AddTable(ENAPP, ATableIdMapping);
+
+  FObjENKZE := TExportENKZE.Create(self, ATableIdMapping);
+  AddTable(FObjENKZE)
+    .AddChildTable(ENKZEZ);
+
+  AddTable(ENKZEZ, ATableIdMapping);
+
+  AddTable(CREPZ, ATableIdMapping)
+    .SetExportEnabled(FExportOptionen.DoEexExport)
+    .AddChildTable(CREEX)
+    .AddChildTable(CREPZI)
+    .AddChildTable(CREPZR)
+    .AddChildTable(CREPZL)
+    .AddChildTable(CREPZP)
+    .AddChildTable(CREPZP_H);
+
+  AddTable(ENSPK, ATableIdMapping).DisableImport  // Geht erst dann, wenn die CREPZ auch importiert werden wird.
+    .AddChildTable(ENSPKE);
+
+  AddTable(ENSPKE, ATableIdMapping).DisableImport;
+
+  AddTable(CREPZI, ATableIdMapping);
+
+  AddTable(CREPZR, ATableIdMapping);
+
+  AddTable(CREEX, ATableIdMapping)
+    .AddChildTable(CREEI)
+    .AddChildTable(CREER)
+    .AddChildTable(CRAUF)
+    .AddChildTable(CREEO)
+    .AddChildTable(CREPZP)
+    .AddChildTable(CREEL)
+    .AddChildTable(CREPZP_H);
+
+  AddTable(CREEO, ATableIdMapping);
+  AddTable(CREEI, ATableIdMapping);
+  AddTable(CREER, ATableIdMapping);
+  AddTable(CREEL, ATableIdMapping);
+  AddTable(CREPZL, ATableIdMapping);
+  AddTable(CREEP, ATableIdMapping);
+  AddTable(CREEP_H, ATableIdMapping);
+  AddTable(CREEPP, ATableIdMapping);
+
+  AddTable(CREPZP, ATableIdMapping)
+    .AddChildTable(CREPZPP)
+    .AddChildTable(CRAUF);
+
+  AddTable(CREPZP_H, ATableIdMapping)
+      .AddChildTable(CREPZPP);
+
+  AddTable(CREPZPP, ATableIdMapping);
+  AddTable(CRAUF, ATableIdMapping);
+  // Todo: Erweitern um EEX-Konfig und EEX-Batch-Tabellen!
+
+   // Inv
+  FObjEDINV := TExportEDINV.Create(self, ATableIdMapping);
+  AddTable(FObjEDINV)     // Storno -> EDINV
+   .SetExportEnabled(FExportOptionen.DoNachrichtenExport and FExportOptionen.DoInvoice)
+   .AddChildTable(EDINVP)
+   .AddChildTable(EDINVB)
+   .AddChildTable(EDINVA)
+   .AddChildTable(EDINVS)
+   .AddChildTable(EDINVSR)
+   .AddChildTable(EDINVVB);
+
+  AddTable(EDINVP, ATableIdMapping)
+   .AddChildTable(EDINVAZ)
+   .AddChildTable(EDINVPA);
+
+  AddTable(EDINVPA, ATableIdMapping);
+  AddTable(EDINVB, ATableIdMapping);
+  AddTable(EDINVS, ATableIdMapping);
+  AddTable(EDINVAZ, ATableIdMapping);
+
+  AddTable(EDINVA, ATableIdMapping)
+    .AddChildTable(EDINVAZI);
+
+  AddTable(EDINVAZI, ATableIdMapping);
+  AddTable(EDINVSR,  ATableIdMapping);
+  AddTable(EDINVVB, ATableIdMapping);
+
+  // Rem
+  AddTable(TExportEDREM.Create(self, ATableIdMapping))
+   .SetExportEnabled(FExportOptionen.DoNachrichtenExport and FExportOptionen.DoRemadv)
+   .AddChildTable(EDREMP);
+
+  AddTable(TExportEDREMP.Create(self, ATableIdMapping))
+   .AddChildTable(EDREMA);
+
+  AddTable(EDREMA, ATableIdMapping)
+   .AddChildTable(EDREMAAR);
+
+  AddTable(EDREMAAR, ATableIdMapping);
+  AddTable(EDREMAFP, ATableIdMapping);
+
+  // EDORD
+  FObjEDORD := TExportEDORD.Create(self, ATableIdMapping);
+  AddTable(FObjEDORD)
+   .SetExportEnabled(FExportOptionen.DoNachrichtenExport and FExportOptionen.DoOrders)
+   .AddChildTable(EDORDKK)
+   .AddChildTable(EDORDLL)
+   .AddChildTable(EDORDMT)
+   .AddChildTable(EDORDMW)
+   .AddChildTable(EDORDNE)
+   .AddChildTable(EDORDPA)
+   .AddChildTable(EDORDPL)
+   .AddChildTable(EDORDPS)
+   .AddChildTable(EDORDPT)
+   .AddChildTable(EDORDRM)
+   .AddChildTable(EDORDRT)
+   .AddChildTable(EDORDMMA)
+   .AddChildTable(EDORDMME)
+   .AddChildTable(EDORDMNE)
+   .AddChildTable(EDORDPMA)
+   .AddChildTable(EDORDPME)
+   .AddChildTable(EDORDPNE)
+   .AddChildTable(EDORDPTR)
+   .AddChildTable(EDORDRSR)
+   .AddChildTable(EDORDRTR)
+   .AddChildTable(EDORDPABR)
+   .AddChildTable(EDORDP)
+   .AddChildTable(EDORDPK);
+
+  AddTable(EDORDKK, ATableIdMapping);
+  AddTable(EDORDLL, ATableIdMapping);
+  AddTable(EDORDMT, ATableIdMapping);
+  AddTable(EDORDMW, ATableIdMapping);
+  AddTable(EDORDNE, ATableIdMapping);
+  AddTable(EDORDPA, ATableIdMapping);
+  AddTable(EDORDPL, ATableIdMapping);
+  AddTable(EDORDPS, ATableIdMapping);
+  AddTable(EDORDPT, ATableIdMapping);
+  AddTable(EDORDRM, ATableIdMapping);
+  AddTable(EDORDRT, ATableIdMapping);
+  AddTable(EDORDMMA, ATableIdMapping)
+    .AddChildTable(EDORDM);
+
+  AddTable(EDORDMME, ATableIdMapping);
+  AddTable(EDORDMNE, ATableIdMapping);
+  AddTable(EDORDPMA, ATableIdMapping);
+  AddTable(EDORDPME, ATableIdMapping);
+  AddTable(EDORDPNE, ATableIdMapping);
+  AddTable(EDORDPTR, ATableIdMapping);
+  AddTable(EDORDRSR, ATableIdMapping);
+  AddTable(EDORDRTR, ATableIdMapping);
+  AddTable(EDORDPABR, ATableIdMapping);
+
+  AddTable(EDORDP, ATableIdMapping)
+   .AddChildTable(EDORDO)
+   .AddChildTable(EDORDM);
+
+  AddTable(EDORDO, ATableIdMapping);
+  AddTable(EDORDM, ATableIdMapping)
+   .AddChildTable(EDORDV);
+
+  AddTable(EDORDV, ATableIdMapping);
+
+  AddTable(EDORDPK, ATableIdMapping)
+   .AddChildTable(EDORDPKS);
+
+  AddTable(EDORDPKS, ATableIdMapping);
+
+  // MSC
+  AddTable(TExportEDMSC.Create(self, ATableIdMapping))     // Storno -> MSC, INV_ID
+   .SetExportEnabled(FExportOptionen.DoNachrichtenExport and FExportOptionen.DoMscons)
+   .AddChildTable(EDMSZP)
+   .AddChildTable(EDMSCA);
+
+//  AddTable(TExportEDMSZP.Create(self, ATableIdMapping))
+//    .SetExportEnabled(ADoEdifact)
+//    .AddChildTable(EDMSZW)
+//    .AddChildTable(EDMSZWP);
+
+  AddTable(TExportEDMSZP.Create(self, ATableIdMapping))
+    .AddChildTable(EDMSZW);
+
+  AddTable(EDMSCA, ATableIdMapping);
+
+  AddTable(TExportEdNachrichtEpv.CreateWithoutEpvArt(self, EDMSZW,  ATableIdMapping))
+   .AddChildTable(EDMSM);
+
+   // Blob MSZWP_LISTE kann nicht so einfach importiert werden
+//  AddTable(EDMSZWP, ATableIdMapping)
+//    .SetExportEnabled(ADoEdifact);
+
+  AddTable(TExportEdNachrichtEpv.Create(self, EDMSM, ATableIdMapping, MSCONS_ZP))
+   .AddChildTable(EDMSZI);
+
+  AddTable(EDMSZI, ATableIdMapping);
+
+  // Dieser Export wird exlizit in TKundenExport.DoExportDaten aufgerufen
+  FObjEDQUO := TExportEDQUO.Create(self, ATableIdMapping);
+  AddTable(FobjEDQUO)
+    .SetExportEnabled(FExportOptionen.DoNachrichtenExport and FExportOptionen.DoQuo)
+    .AddChildTable(EDQUOP)
+    .AddChildTable(EDQUOPL)
+    .AddChildTable(EDQUOPK)
+    .AddChildTable(EDQUOPS)
+    .AddChildTable(EDQUOPST);
+
+  // diese Tabellen werden automatisch exportiert (aus den Abhängigkeiten)
+  AddTable(EDQUOP, ATableIdMapping);
+  AddTable(EDQUOPL, ATableIdMapping);
+  AddTable(EDQUOPK, ATableIdMapping);
+  AddTable(EDQUOPS, ATableIdMapping);
+  AddTable(EDQUOPST, ATableIdMapping);
+
+  // EDUTLV
+  AddTable(TExportEDUTLV.Create(self, ATableIdMapping)) // -> MSC_ID
+   .SetExportEnabled(FExportOptionen.DoNachrichtenExport and FExportOptionen.DoUtlv)
+   .SetImportEnabled(FImportOptionen.UtlvNichtImportieren)
+   .AddChildTable(EDUTSAI)
+   .AddChildTable(EDUTKA)
+   .AddChildTable(EDUTMU)
+   .AddChildTable(EDUTMA)
+   .AddChildTable(EDUTZE)
+   .AddChildTable(EDUTO)
+   .AddChildTable(EDUTMD)
+   .AddChildTable(EDUTMB)
+   .AddChildTable(EDUTSE)
+   .AddChildTable(EDUTKE)
+   .AddChildTable(EDUTW)
+   .AddChildTable(EDUAAL)
+   .AddChildTable(EDUTBK)
+   .AddChildTable(EDUTLL)
+   .AddChildTable(EDUTAS)
+   .AddChildTable(EDUTZP)
+   .AddChildTable(EDUTAK)
+   .AddChildTable(EDUTSM)
+   .AddChildTable(EDUTMAD)
+   .AddChildTable(EDUTSB)
+   .AddChildTable(EDUTBM)
+   .AddChildTable(EDUTOMA)
+   .AddChildTable(EDUTTD)
+   .AddChildTable(EDUTOT)
+   .AddChildTable(EDUTMED)
+   .AddChildTable(EDUTOME)
+   .AddChildTable(EDUTKDN)
+   .AddChildTable(EDUTKDA)
+   .AddChildTable(EDUTPD)
+   .AddChildTable(EDUTPSD)
+   .AddChildTable(EDUTTMA)
+   .AddChildTable(EDUTTME)
+   .AddChildTable(EDUTTRD)
+   .AddChildTable(EDUTSZ)
+   .AddChildTable(EDUTVN)
+   .AddChildTable(EDUTMMA)
+   .AddChildTable(EDUTMME)
+   .AddChildTable(EDUTMT)
+   .AddChildTable(EDUTPNE)
+   .AddChildTable(EDUTNNABR)
+   .AddChildTable(EDUTABR)
+   .AddChildTable(EDUTMG)
+   .AddChildTable(EDUTRV)
+   .AddChildTable(EDUTNED)
+   .AddChildTable(EDUTABRNL)
+   .AddChildTable(EDUTRPD);
+   // Todo (?) .AddChildTable(EDPRV)
+
+  AddTable(TExportEDUTL.Create(self, ATableIdMapping))
+   .AddChildTable(EDUTLV);
+
+  AddTable(EDUTSAI, ATableIdMapping);
+  AddTable(TExportEDULRefReplace.Create(self, EDUTKA, ATableIdMapping));
+
+  AddTable(TExportEDULRefReplace.Create(self, EDUTMU, ATableIdMapping))
+   .AddChildTable(EDUTMUR);
+
+  AddTable(TExportEDULRefReplace.Create(self, EDUTMUR, ATableIdMapping));
+
+  AddTable(EDUTMA, ATableIdMapping)
+   .AddChildTable(EDUTMAR);
+
+  AddTable(TExportEDULRefReplace.Create(self, EDUTMAR, ATableIdMapping));
+  AddTable(TExportEDULRefReplace.Create(self, EDUTZE, ATableIdMapping));
+  AddTable(TExportEDULRefReplace.Create(self, EDUTO, ATableIdMapping));
+
+  AddTable(EDUTMD, ATableIdMapping)
+   .AddChildTable(EDUTMDR);
+
+  AddTable(TExportEDULRefReplace.Create(self, EDUTMDR, ATableIdMapping));
+  AddTable(EDUTMB, ATableIdMapping)
+   .AddChildTable(EDUTMBR);
+
+  AddTable(TExportEDULRefReplace.Create(self, EDUTMBR, ATableIdMapping));
+
+  AddTable(TExportEDULRefReplace.Create(self, EDUTSE, ATableIdMapping))
+   .AddChildTable(EDUTSR);
+
+  AddTable(TExportEDULRefReplace.Create(self, EDUTSR, ATableIdMapping));
+  AddTable(TExportEDULRefReplace.Create(self, EDUTKE, ATableIdMapping))
+   .AddChildTable(EDUTKR);
+
+  AddTable(TExportEDULRefReplace.Create(self, EDUTKR, ATableIdMapping));
+
+  AddTable(TExportEDULRefReplace.Create(self, EDUTW, ATableIdMapping))
+   .AddChildTable(EDUTWR);
+
+  AddTable(TExportEDULRefReplace.Create(self, EDUTWR, ATableIdMapping));
+
+  AddTable(EDUAAL, ATableIdMapping);
+  AddTable(EDUTBK, ATableIdMapping);
+  AddTable(EDUTLL, ATableIdMapping)
+   .AddChildTable(EDUTLLR);
+
+  AddTable(TExportEDULRefReplace.Create(self, EDUTLLR, ATableIdMapping));
+  AddTable(EDUTAS, ATableIdMapping);
+
+  FObjEDUTZP := TExportEDUTZP.Create(self, ATableIdMapping);
+  AddTable(FObjEDUTZP)
+   .AddChildTable(EDUZRM)
+   .AddChildTable(EDUTZW);
+
+  AddTable(TExportEDULRefReplace.Create(self, EDUZRM, ATableIdMapping));
+  AddTable(TExportEdNachrichtEpv.CreateWithoutEpvArt(self, EDUTZW, ATableIdMapping));
+
+  AddTable(EDUTAK, ATableIdMapping)
+   .AddChildTable(EDUTAKR);
+
+  AddTable(TExportEDULRefReplace.Create(self, EDUTAKR, ATableIdMapping));
+  AddTable(TExportEDULRefReplace.Create(self, EDUTSM, ATableIdMapping));
+
+  AddTable(TExportEDULRefReplace.Create(self, EDUTMAD, ATableIdMapping))
+   .AddChildTable(EDUTBK)
+   .AddChildTable(EDUTGW);
+
+  AddTable(EDUTGW, ATableIdMapping);
+
+  AddTable(TExportEDULRefReplace.Create(self, EDUTOMA, ATableIdMapping))
+   .AddChildTable(EDUTOMR);
+
+  AddTable(EDUTOMR, ATableIdMapping)
+  .AddChildTable(EDUTOVZ);
+
+  AddTable(EDUTOVZ, ATableIdMapping);
+
+  AddTable(TExportEDULRefReplace.Create(self, EDUTSB, ATableIdMapping))
+  .AddChildTable(EDUTSBR);
+
+  AddTable(TExportEDULRefReplace.Create(self, EDUTSBR, ATableIdMapping));
+
+  AddTable(EDUTBM, ATableIdMapping)
+  .AddChildTable(EDUTBMR);
+
+  AddTable(EDUTBMR, ATableIdMapping);
+  AddTable(TExportEDULRefReplace.Create(self, EDUTTD, ATableIdMapping));
+  AddTable(TExportEDULRefReplace.Create(self, EDUTOT, ATableIdMapping));
+
+  AddTable(TExportEDULRefReplace.Create(self, EDUTMED, ATableIdMapping))
+   .AddChildTable(EDUTMER);
+
+  AddTable(TExportEDULRefReplace.Create(self, EDUTMER, ATableIdMapping));
+  AddTable(TExportEDULRefReplace.Create(self, EDUTOME, ATableIdMapping))
+   .AddChildTable(EDUTOMER);
+
+  AddTable(TExportEDULRefReplace.Create(self, EDUTOMER, ATableIdMapping));
+  AddTable(EDUTKDN, ATableIdMapping);
+  AddTable(EDUTKDA, ATableIdMapping);
+
+  AddTable(TExportEDULRefReplace.Create(self, EDUTTRD, ATableIdMapping));
+
+  AddTable(TExportEDULRefReplace.Create(self, EDUTPD, ATableIdMapping))
+   .AddChildTable(EDUTBG);
+
+  AddTable(TExportEDULRefReplace.Create(self, EDUTPSD, ATableIdMapping));
+  AddTable(TExportEDULRefReplace.Create(self, EDUTRPD, ATableIdMapping))
+    .AddChildTable(EDUTBG);
+
+  AddTable(EDUTBG, ATableIdMapping);
+  AddTable(TExportEDULRefReplace.Create(self, EDUTTMA, ATableIdMapping));
+  AddTable(TExportEDULRefReplace.Create(self, EDUTTME, ATableIdMapping));
+
+  AddTable(EDUTSZ, ATableIdMapping);
+
+  AddTable(EDUTVN, ATableIdMapping)
+   .AddChildTable(EDUTVNR);
+
+  AddTable(EDUTVNR, ATableIdMapping);
+
+  AddTable(EDUTMMA, ATableIdMapping)
+   .AddChildTable(EDUTMVZ);
+
+  AddTable(EDUTMVZ, ATableIdMapping);
+  AddTable(TExportEDULRefReplace.Create(self, EDUTMME, ATableIdMapping));
+
+  AddTable(TExportEDULRefReplace.Create(self, EDUTMT, ATableIdMapping))
+   .AddChildTable(EDUTMVZ);
+
+  AddTable(TExportEDULRefReplace.Create(self, EDUTPNE,  ATableIdMapping))
+   .AddChildTable(EDUTPMR);
+
+  AddTable(EDUTPMR, ATableIdMapping);
+
+  AddTable(EDUTNNABR, ATableIdMapping)
+   .AddChildTable(EDUTZZR);
+
+  AddTable(EDUTZZR, ATableIdMapping);
+
+  AddTable(EDUTABR, ATableIdMapping);
+
+  AddTable(TExportEDULRefReplace.Create(self, EDUTMG, ATableIdMapping))
+   .AddChildTable(EDUTMGR);
+
+  AddTable(TExportEDULRefReplace.Create(self, EDUTMGR, ATableIdMapping));
+  AddTable(EDUTRV, ATableIdMapping);
+  AddTable(TExportEDULRefReplace.Create(self, EDUTNED, ATableIdMapping));
+  AddTable(EDUTABRNL, ATableIdMapping);
+
+  // Ende EDUTLV
+
+  // Todo (?): AddTable(EDAPE, EDAPE, 'APE_ID');
+  // Todo (?) AddTable(EDPRG, EDPRG, 'prg_id')
+  // Todo (?) AddTable(EDPRV, EDPRV, 'prv_id')
+
+  AddTable(TExportEDDAT.Create(self, ATableIdMapping))
+   .SetExportEnabled(FExportOptionen.DoNachrichtenExport)
+   .SetAutoSelectChildIds(false)
+   .AddChildTable(EDMSC) // Vor INV: EDINV.MSC_ID
+   .AddChildTable(EDUTL)
+   .AddChildTable(EDQUO)
+   .AddChildTable(EDINV)
+   .AddChildTable(EDREM)
+   .AddChildTable(EDORD)
+   .AddChildTable(EDCTR);// Reihenfolge nur für den EXPORT, im Import muss die EDCTR vor der EDDAT importiert werden
+
+  AddTable(TExportEDCTR.Create(self, ATableIdMapping))
+   .SetExportEnabled(FExportOptionen.DoNachrichtenExport);
+
+  AddTable(TExportENZptAbh.Create(self, ENZNLK, ATableIdMapping))
+    .AddChildTable(ENNLK);
+  AddTable(ENNLK, ATableIdMapping);
+
+  AddTable(TExportENZptAbh.Create(self, ENNMH, ATableIdMapping, '')
+      .AddZptIdFieldName('ZPT_ID_MELO')
+      .AddZptIdFieldName('ZPT_ID_NELO'));
+
+  AddTable(TExportENZptAbh.Create(self, ENZPNPRR, ATableIdMapping))
+    .DisableImport; // Aktuell noch kein Import
+
+  AddTable(TExportENZptAbh.Create(self, ENZND, ATableIdMapping));
+
+  fObjENLOKB := TExportENLOKB.Create(self, ATableIdMapping);
+
+  AddTable(ObjENLOKB)
+    .DisableImport // Todo Import: MKI
+    .AddChildTable(ENLOKBZ);
+
+  AddTable(ENLOKBZ, ATableIdMapping)
+    .DisableImport // Todo Import: MKI
+    .AddChildTable(ENLOKBE);
+
+  AddTable(TExportENLOKBE.Create(self, ATableIdMapping))
+    .DisableImport // Todo Import: MKI
+    .AddChildTable(ENLOKBER);
+
+  AddTable(ENLOKBER, ATableIdMapping)
+    .DisableImport; // Todo Import: MKI
+
+  // Nur zum Resolving, kein Import!
+  AddTable(ENLOKS, ATableIdMapping)  // TODO: alsc - exportieren? eher nicht
+     .DisableImport // kein Import, wird später) nur (fürs Resolving verwendet!
+     .AddChildTable(ENLOKSA);  // TODO: alsc - exportieren? eher nicht
+
+  AddTable(TExportENLOKSA.Create(self, ATableIdMapping))
+     .DisableImport; // kein Import, wird später) nur (fürs Resolving verwendet!
+
+  AddTable(ENLOKSO, ATableIdMapping) // TODO: alsc - auflösen über Strukturcode Alt-Key - Neu-Key
+     .DisableImport; // kein Import, wird später) nur (fürs Resolving verwendet!
+
+
+  FObjENTRE := TExportENTRE.Create(self, ATableIdMapping);
+
+  AddTable(FObjENTRE)
+    .AddChildTable(ENTRD)
+    .AddChildTable(ENTRME)
+    .AddChildTable(ENTRMA)
+    .AddChildTable(ENSDAK);
+
+  AddTable(ENTRD, ATableIdMapping)
+     .DisableImport; // Todo Import: MKI
+  AddTable(ENTRMA, ATableIdMapping)
+     .DisableImport; // Todo Import: MKI
+  AddTable(ENTRME, ATableIdMapping)
+     .DisableImport; // Todo Import: MKI
+
+  FObjENSRE := TExportENSRE.Create(self, ATableIdMapping);
+
+  AddTable(FObjENSRE)
+    .DisableImport // Todo Import: MKI
+    .AddChildTable(ENSRD)
+    .AddChildTable(ENSRMB)
+    .AddChildTable(ENSRPRD)
+    .AddChildTable(ENSDAK); // sdak zu sre. meisten SDAK Sätze werden zu ZPT_ID exportiert.
+
+  AddTable(ENSRD, ATableIdMapping)
+     .DisableImport; // Todo Import: MKI
+  AddTable(ENSRMB, ATableIdMapping)
+     .DisableImport; // Todo Import: MKI
+  AddTable(ENSRPRD, ATableIdMapping)
+     .DisableImport // Todo Import: MKI
+    .AddChildTable(ENSRPRDR);
+
+  AddTable(ENSRPRDR, ATableIdMapping)
+      .DisableImport; // Erst mal kein Import ... Da müssten noch Stammdaten exportiert werden.
+
+  // ENSDAK - Start ----------------------------------
+  // TODO: alsc - Import implementieren
+  FObjENSDAK := TExportENSDAK.Create(self, ATableIdMapping);
+  AddTable(FObjENSDAK)
+    .DisableImport
+    .AddChildTable(ENSDAZT)
+    .AddChildTable(ENSDAFA);
+
+  AddTable(ENSDAZT, ATableIdMapping)
+    .DisableImport
+    .AddChildTable(ENSDAMA)
+    .AddChildTable(ENSDANE)
+    .AddChildTable(ENSDAME)
+    .AddChildTable(ENSDABE)
+    .AddChildTable(ENSDATR)
+    .AddChildTable(ENSDASR);
+
+  AddTable(ENSDAMA, ATableIdMapping)
+    .DisableImport
+    .AddChildTable(ENSDAO)
+    .AddChildTable(ENSDAAD)
+    .AddChildTable(ENSDAAB)
+    .AddChildTable(ENSDAPR);
+
+  AddTable(ENSDANE, ATableIdMapping)
+    .DisableImport
+    .AddChildTable(ENSDAO)
+    .AddChildTable(ENSDAAB)
+    .AddChildTable(ENSDAPR);
+
+  AddTable(ENSDAME, ATableIdMapping)
+    .DisableImport
+    .AddChildTable(ENSDAG)
+    .AddChildTable(ENSDAO)
+    .AddChildTable(ENSDAAD);
+
+  AddTable(ENSDAG, ATableIdMapping)
+    .DisableImport
+    .AddChildTable(ENSDAO);
+
+  AddTable(ENSDABE, ATableIdMapping)
+    .DisableImport
+    .AddChildTable(ENSDABER);
+
+  AddTable(ENSDABER, ATableIdMapping).DisableImport;
+
+  AddTable(ENSDAAD, ATableIdMapping).DisableImport;
+  AddTable(ENSDAAB, ATableIdMapping).DisableImport;
+  AddTable(ENSDATR, ATableIdMapping).DisableImport;
+
+  AddTable(ENSDASR, ATableIdMapping)
+    .DisableImport
+    .AddChildTable(ENSDAPR);
+
+  AddTable(ENSDAO, ATableIdMapping)
+    .DisableImport
+    .AddChildTable(ENSDARVZ);
+
+  AddTable(ENSDARVZ, ATableIdMapping).DisableImport;
+  AddTable(ENSDAPR, ATableIdMapping).DisableImport;
+  AddTable(ENSDAFA, ATableIdMapping).DisableImport;
+  // ENSDAK - Ende ----------------------------------
+
+  AddTable(TExportENNWS.Create(self, ATableIdMapping))
+    .SetAutoselectChildIds(false)
+    .AddChildTable(ENNWM);
+
+  FObjENNWM := TExportENNWM.Create(self, ATableIdMapping);
+
+  AddTable(FObjENNWM)
+    .AddChildTable(ENNWMN);
+
+  AddTable(ENNWMN, ATableIdMapping);
+
+  FillParents;
+  ExportEnabledAnChildsKopieren;
+
+  if DebugHook > 0 then
+    CheckChilds;
+end;
+
+procedure TExpImpObjectManager.FillParents;
+var idx, idx2: Integer;
+    master, child: TExpImpTableObj;
+
+begin
+  for idx := 0 to Count - 1 do
+    items[idx].Parents.Clear;
+
+  for idx := 0 to Count - 1 do
+  begin
+    master := items[idx];
+    if (master.ChildTables.Count > 0) then
+    begin
+      for idx2 := 0 to master.ChildTables.Count - 1 do
+      begin
+        child := GetItemByIdentifier(Master.ChildTables[idx2]);
+        if (child <> nil) and (child.Parents.IndexOf(master) <0) then
+          child.Parents.Add(master);
+      end;
+    end;
+  end;
+end;
+
+
+procedure TExpImpObjectManager.ExportEnabledAnChildsKopieren;
+
+  procedure DisableChilds(AMaster: TExpImpTableObj);
+  var child: TExpImpTableObj;
+      idx: Integer;
+  begin
+    for idx := 0 to AMaster.ChildTables.Count -1 do
+    begin
+      child := GetItemByIdentifier(AMaster.ChildTables[idx]);
+      if child <> nil then
+      begin
+        // nur Disablen, wenn child keine anderen master hat!
+        if child.Parents.Count = 1 then
+          child.CanDoExport := false;
+      end;
+    end;
+  end;
+
+var idx: Integer;
+begin
+  for idx := 0 to Count - 1 do
+    if not items[idx].CanDoExport and (items[idx].ChildTables.Count > 0) then
+      DisableChilds(items[idx]);
+end;
+
+procedure TExpImpObjectManager.InitTables(ATables: TTablesObj);
+var idx,  tabIdx: Integer;
+begin
+  for tabIdx := 0 to ATables.Childs.Count - 1 do
+    for idx := 0 to Count - 1 do
+     items[idx].AddImportValues(TTAbleObj(ATables.Childs.Items[tabIdx]));
+end;
+
+{ TExportEDINV }
+
+constructor TExportEDINV.Create(AOwner: TExpImpObjectManager; ATableIdMapping: TelStringObjectMap<TTableIdMapping>);
+begin
+  inherited Create(AOwner, EDINV, ATableIdMapping, TNachrichtenFormat.INVOIC);
+  FSelectEdNachricht := nil;
+  FSelectEdepv := nil;
+  FSelectEdremp := nil;
+  AddMpidNummerCol('inv_sender_iln');
+  AddMpidNummerCol('inv_empf_iln');
+end;
+
+destructor TExportEDINV.Destroy;
+begin
+  FreeAndNil(FSelectEdNachricht);
+  FreeAndNil(FSelectEdepv);
+  FreeAndNil(FSelectEdremp);
+  inherited;
+end;
+
+function TExportEDINV.DoInitialSelectByMlkIds(AConnection: TecConnection; AMndId: Integer;
+  AMlkIds: TelSimpleLongIdList): Integer;
+var qry: TSqlQuery;
+    i: integer;
+begin
+  result := 0;
+  if not FOwner.ExportOptionen.DoNachrichtenExport then
+    exit;
+
+  qry := AConnection.CreateSQLQuery;
+  try
+    qry.SQL.Text :='SELECT INV_ID FROM ' + EDINV + ' WHERE MLK_ID = :MLK_ID AND MND_ID = ' + IntToStr(AMndId);
+    qry.DBPrepare;
+    for i := 0 to AMlkIds.Count - 1 do
+    begin
+      qry.Params[0].AsLongId := AMlkIds[i];
+      try
+        qry.Open;
+        while not qry.Eof do
+        begin
+          if SelectIdForExport(qry.Fields[0].AsLongId, 'TExportEDINV.DoInitialSelectByMlkIds(' + IntToStr(AMndId) + '), MlkId: ' + AMlkIds[i].ToStr) then
+            inc(result);
+          qry.Next;
+        end;
+      finally
+        qry.Close;
+      end;
+    end;
+  finally
+    qry.Free;
+  end;
+end;
+
+function TExportEDINV.DoInitialSelectByZptIds(AConnection: TecConnection; AMndId: Integer;
+  AZptIds: TelSimpleLongIdList): Integer;
+var qry: TSqlQuery;
+    i: integer;
+begin
+  result := 0;
+  if not FOwner.ExportOptionen.DoNachrichtenExport then
+    exit;
+
+  qry := AConnection.CreateSQLQuery;
+  try
+    qry.SQL.Text :='SELECT INV_ID FROM ' + EDINV + ' WHERE ZPT_ID = :ZPT_ID AND MND_ID = ' + IntToStr(AMndId);
+    qry.DBPrepare;
+    for i := 0 to AZptIds.Count - 1 do
+    begin
+      qry.Params[0].AsLongId := AZptIds[i];
+      try
+        qry.Open;
+        while not qry.Eof do
+        begin
+          if SelectIdForExport(qry.Fields[0].AsLongId, 'TExportEDINV.DoInitialSelectByZptIds(' + IntToStr(AMndId) + '), ZptId: ' + AZptIds[i].ToStr) then
+            inc(result);
+          qry.Next;
+        end;
+      finally
+        qry.Close;
+      end;
+    end;
+  finally
+    qry.Free;
+  end;
+end;
+
+function TExportEDINV.PrepareId(AConnection: TecConnection; AKundenExport: IKundenExport; AId: TLongId; AExpImpManager: TExpImpObjectManager): boolean;
+begin
+  result := inherited PrepareId(AConnection, AKundenExport, AId, AExpImpManager);
+  if FSelectEdNachricht = nil then
+  begin
+     FSelectEdNachricht := AConnection.CreateSQLQuery;
+     FSelectEdNachricht.SQL.Text := 'SELECT DAT_ID, INV_ID, INV_STORNOINV_ID, INV_SENDER_ILN, INV_EMPF_ILN, MSC_ID FROM ' + EDINV + ' WHERE INV_ID = :INV_ID OR INV_STORNOINV_ID = :INV_ID';
+     FSelectEdNachricht.DBPrepare;
+  end;
+
+  FSelectEdNachricht.ParamByName('INV_ID').AsLongId := AId;
+  try
+    FSelectEdNachricht.Open();
+    if not FSelectEdNachricht.Eof then
+    begin
+      if not FSelectEdNachricht.FieldByName('INV_STORNOINV_ID').IsNull and
+         SelectIdForExport(FSelectEdNachricht.FieldByName('INV_STORNOINV_ID').AsLongId, 'TExportEDINV.PrepareId, ' + AId.ToStr + ' / INV_STORNOINV_ID') then
+         result := true;
+      if not FSelectEdNachricht.FieldByName('INV_ID').IsNull and
+         SelectIdForExport(FSelectEdNachricht.FieldByName('INV_ID').AsLongId, 'TExportEDINV.PrepareId, ' + AId.ToStr + ' / INV_ID') then
+         result := true;
+
+      if AExpImpManager.GetItemByIdentifier(EDDAT).SelectIdForExport(FSelectEdNachricht.FieldByName('DAT_ID').AsLongId, 'TExportEDINV.PrepareId, ' + AId.ToStr + ' / DAT_ID') then
+         result := true;
+
+      if AExpImpManager.GetItemByIdentifier(EDMSC).SelectIdForExport(FSelectEdNachricht.FieldByName('MSC_ID').AsLongId, 'TExportEDINV.PrepareId, ' + AId.ToStr + ' / MSC_ID') then
+         result := true;
+
+       AKundenExport.AddToMprdList(FSelectEdNachricht.FieldByName('INV_SENDER_ILN').AsString);
+       AKundenExport.AddToMprdList(FSelectEdNachricht.FieldByName('INV_EMPF_ILN').AsString);
+    end;
+  finally
+    FSelectEdNachricht.Close;
+  end;
+
+  if FSelectEdremp = nil then
+  begin
+     FSelectEdremp := AConnection.CreateSQLQuery;
+     FSelectEdremp.SQL.Text := 'SELECT DISTINCT REM_ID FROM ' + EDREMP + ' WHERE INV_ID = :INV_ID';
+     FSelectEdremp.DBPrepare;
+  end;
+
+  FSelectEdremp.ParamByName('INV_ID').AsLongId := AId;
+  try
+    FSelectEdremp.Open();
+    while not FSelectEdremp.Eof do
+    begin
+      if AExpImpManager.GetItemByIdentifier(EDREM).SelectIdForExport(FSelectEdremp.FieldByName('REM_ID').AsLongId, 'TExportEDINV.PrepareId, ' + AId.ToStr + ' / REM_ID') then
+         result := true;
+      FSelectEdremp.Next;
+    end;
+  finally
+    FSelectEdremp.Close;
+  end;
+end;
+
+function TExportEDINV.GetNewColumnValue(ATable: TTAbleObj; AColumn: TColumnObj;
+  AKundenImport: IKundenImport; Var ANewValue: String; AForInsert: Boolean): Boolean;
+var orgValue: String;
+begin
+  result := inherited GetNewColumnValue(ATable, AColumn, AKundenImport, ANewValue, AForInsert);
+  if result then
+    exit;
+  if AColumn.Columnname = 'INV_METERINGCODE' then
+  begin
+    orgValue := AColumn.Value;
+    if length(AColumn.Value) = MeteringCodeLaenge then
+      ANewValue := AKundenImport.GetMappedMeteringCode(AColumn.Value)
+     else
+      ANewValue := AKundenImport.GetMappedMaloCode(AColumn.Value);
+    result := Acolumn.Value <> orgValue;
+  end
+    else
+  if (AColumn.Columnname = 'INV_NACHRICHTENREFERENZNR') then
+  begin
+    orgValue := AColumn.Value;
+    ANewValue := AKundenImport.GetMappedEdiRef(AColumn.Value, 14);
+    result := Acolumn.Value <> orgValue;
+  end
+    else
+  if ((AColumn.Columnname = 'INV_NACHRICHTNR') or
+      (AColumn.Columnname = 'INV_STORNOREF_NR')) then
+  begin
+    orgValue := AColumn.Value;
+    ANewValue := AKundenImport.GetMappedRechnungsNr(AColumn.Value, 35);
+    result := Acolumn.Value <> orgValue;
+  end
+    else
+  if (AColumn.Columnname = 'INV_ANWEND_REF_NR') or
+     (AColumn.Columnname = 'INV_ORD_REF_NR') or
+     (AColumn.Columnname = 'INV_MSC_REF_NR') or
+     (AColumn.Columnname = 'INV_REFERENZNR') or
+     (AColumn.Columnname = 'INV_SSQ_REF_NR') then
+  begin
+    orgValue := AColumn.Value;
+    ANewValue := AKundenImport.GetMappedEdiRef(AColumn.Value, 70);
+    result := Acolumn.Value <> orgValue;
+  end
+  else
+  if (AColumn.Columnname = 'INV_KND_NR') then
+  begin
+    orgValue := AColumn.Value;
+    ANewValue := AKundenImport.GetMappedKndNr1(AColumn.Value);
+    result := Acolumn.Value <> orgValue;
+  end;
+  // ggf. noch KndNr1 ersetzen
+end;
+
+{ TExportEDREM }
+
+constructor TExportEDREM.Create(AOwner: TExpImpObjectManager; ATableIdMapping: TelStringObjectMap<TTableIdMapping>);
+begin
+  inherited Create(AOwner, EDREM, ATableIdMapping, TNachrichtenFormat.REMADV);
+  FSelectEdNachricht := nil;
+  AddMpidNummerCol('rem_sender_iln');
+  AddMpidNummerCol('rem_empf_iln');
+end;
+
+destructor TExportEDREM.Destroy;
+begin
+  FreeAndNil(FSelectEdNachricht);
+  inherited;
+end;
+
+function TExportEDREM.PrepareId(AConnection: TecConnection; AKundenExport: IKundenExport;
+  AId: TLongId; AExpImpManager: TExpImpObjectManager): boolean;
+begin
+  result := inherited PrepareId(AConnection, AKundenExport, AId, AExpImpManager);
+  if FSelectEdNachricht = nil then
+  begin
+     FSelectEdNachricht := AConnection.CreateSQLQuery;
+     FSelectEdNachricht.SQL.Text := 'SELECT DAT_ID, REM_SENDER_ILN, REM_EMPF_ILN FROM ' + EDREM  + ' WHERE REM_ID = :REM_ID';
+     FSelectEdNachricht.DBPrepare;
+  end;
+
+  FSelectEdNachricht.ParamByName('REM_ID').AsLongId := AId;
+  try
+    FSelectEdNachricht.Open();
+    if not FSelectEdNachricht.Eof then
+    begin
+      if AExpImpManager.GetItemByIdentifier(EDDAT).SelectIdForExport(FSelectEdNachricht.FieldByName('DAT_ID').AsLongId, 'TExportEDREM, ' + AId.ToStr) then
+         result := true;
+
+       AKundenExport.AddToMprdList(FSelectEdNachricht.FieldByName('REM_SENDER_ILN').AsString);
+       AKundenExport.AddToMprdList(FSelectEdNachricht.FieldByName('REM_EMPF_ILN').AsString);
+    end;
+  finally
+    FSelectEdNachricht.Close;
+  end;
+end;
+
+function TExportEDREM.GetNewColumnValue(ATable: TTAbleObj; AColumn: TColumnObj;
+  AKundenImport: IKundenImport; Var ANewValue: String; AForInsert: Boolean): Boolean;
+begin
+  result := inherited GetNewColumnValue(ATable, AColumn, AKundenImport, ANewValue, AForInsert);
+  if result then
+    exit;
+  if (AColumn.Columnname = 'REM_NACHRICHTNR') then
+  begin
+    ANewValue := AKundenImport.GetMappedEdiRef(AColumn.Value, 35);
+    result := ANewValue <> AColumn.Value;
+  end
+   else
+  if (AColumn.Columnname = 'REM_NACHRICHTENREFERENZNR') or
+     (AColumn.Columnname = 'REM_DATEIAUSTAUSCHREFERENZ') then
+  begin
+    ANewValue := AKundenImport.GetMappedEdiRef(AColumn.Value, 14);
+    result := ANewValue <> AColumn.Value;
+  end
+   else
+  if (AColumn.Columnname = 'REM_REFERENZNR') then
+  begin
+    ANewValue := AKundenImport.GetMappedEdiRef(AColumn.Value, 70);
+    result := ANewValue <> AColumn.Value;
+  end
+end;
+
+{ TExportEDORD }
+
+constructor TExportEDORD.Create(AOwner: TExpImpObjectManager; ATableIdMapping: TelStringObjectMap<TTableIdMapping>);
+begin
+  inherited Create(AOwner, EDORD, ATableIdMapping, TNachrichtenFormat.ORDERS);
+  FSelectEdNachricht := nil;
+  FSelectEdepv := nil;
+  AddMpidNummerCol('ord_sender_iln');
+  AddMpidNummerCol('ord_empf_iln');
+end;
+
+destructor TExportEDORD.Destroy;
+begin
+  FreeAndNil(FSelectEdNachricht);
+  FreeAndNil(FSelectEdepv);
+  inherited;
+end;
+
+function TExportEDORD.DoInitialSelectByMlkIds(AConnection: TecConnection; AMndId: Integer; AMlkIds: TelSimpleLongIdList): Integer;
+var
+  qry: TSqlQuery;
+  i: integer;
+begin
+  result := 0;
+  if not FOwner.ExportOptionen.DoNachrichtenExport then
+    exit;
+
+  qry := AConnection.CreateSQLQuery;
+  try
+    qry.SQL.Text :='SELECT ORD_ID FROM ' + EDORD + ' WHERE MLK_ID = :MLK_ID AND MND_ID = ' + IntToStr(AMndId);
+    qry.DBPrepare;
+    for i := 0 to AMlkIds.Count - 1 do
+    begin
+      qry.Params[0].AsLongId := AMlkIds[i];
+      try
+        qry.Open;
+        while not qry.Eof do
+        begin
+          if SelectIdForExport(qry.Fields[0].AsLongId, 'TExportEDORD.DoInitialSelectByMlkIds(' + IntToStr(AMndId) + '), MlkId: ' + AMlkIds[i].ToStr) then
+            inc(result);
+          qry.Next;
+        end;
+      finally
+        qry.Close;
+      end;
+    end;
+  finally
+    qry.Free;
+  end;
+end;
+
+function TExportEDORD.DoInitialSelectByZptIds(AConnection: TecConnection; AMndId: Integer; AZptIds: TelSimpleLongIdList): Integer;
+var
+  qry: TSqlQuery;
+  i: integer;
+begin
+  result := 0;
+  if not FOwner.ExportOptionen.DoNachrichtenExport then
+    exit;
+
+  qry := AConnection.CreateSQLQuery;
+  try
+    qry.SQL.Text :='SELECT ORD_ID FROM ' + EDORD + ' WHERE ZPT_ID = :ZPT_ID AND MND_ID = ' + IntToStr(AMndId);
+    qry.DBPrepare;
+    for i := 0 to AZptIds.Count - 1 do
+    begin
+      qry.Params[0].AsLongId := AZptIds[i];
+      try
+        qry.Open;
+        while not qry.Eof do
+        begin
+          if SelectIdForExport(qry.Fields[0].AsLongId, 'TExportEDORD.DoInitialSelectByZptIds(' + IntToStr(AMndId) + '), ZptId: ' + AZptIds[i].ToStr) then
+            inc(result);
+          qry.Next;
+        end;
+      finally
+        qry.Close;
+      end;
+    end;
+  finally
+    qry.Free;
+  end;
+end;
+
+function TExportEDORD.PrepareId(AConnection: TecConnection; AKundenExport: IKundenExport; AId: TLongId; AExpImpManager: TExpImpObjectManager): boolean;
+begin
+  result := inherited PrepareId(AConnection, AKundenExport, AId, AExpImpManager);
+  if FSelectEdNachricht = nil then
+  begin
+     FSelectEdNachricht := AConnection.CreateSQLQuery;
+     FSelectEdNachricht.SQL.Text := 'SELECT DAT_ID, ORD_ID, ORD_SENDER_ILN, ORD_EMPF_ILN, MSC_ID FROM ' + EDORD + ' WHERE ORD_ID = :ORD_ID';
+     FSelectEdNachricht.DBPrepare;
+  end;
+
+  FSelectEdNachricht.ParamByName('ORD_ID').AsLongId := AId;
+  try
+    FSelectEdNachricht.Open();
+    if not FSelectEdNachricht.Eof then
+    begin
+      if not FSelectEdNachricht.FieldByName('ORD_ID').IsNull and
+         SelectIdForExport(FSelectEdNachricht.FieldByName('ORD_ID').AsLongId, 'TExportEDORD.PrepareId, ' + AId.ToStr + ' / ORD_ID') then
+         result := true;
+
+      if AExpImpManager.GetItemByIdentifier(EDDAT).SelectIdForExport(FSelectEdNachricht.FieldByName('DAT_ID').AsLongId, 'TExportEDORD.PrepareId, ' + AId.ToStr + ' / DAT_ID') then
+         result := true;
+
+      if AExpImpManager.GetItemByIdentifier(EDMSC).SelectIdForExport(FSelectEdNachricht.FieldByName('MSC_ID').AsLongId, 'TExportEDORD.PrepareId, ' + AId.ToStr + ' / MSC_ID') then
+         result := true;
+
+       AKundenExport.AddToMprdList(FSelectEdNachricht.FieldByName('ORD_SENDER_ILN').AsString);
+       AKundenExport.AddToMprdList(FSelectEdNachricht.FieldByName('ORD_EMPF_ILN').AsString);
+    end;
+  finally
+    FSelectEdNachricht.Close;
+  end;
+end;
+
+function TExportEDORD.GetNewColumnValue(ATable: TTAbleObj; AColumn: TColumnObj; AKundenImport: IKundenImport; Var ANewValue: String; AForInsert: Boolean): Boolean;
+var
+  orgValue: String;
+begin
+  result := inherited GetNewColumnValue(ATable, AColumn, AKundenImport, ANewValue, AForInsert);
+  if result then
+    exit;
+  if AColumn.Columnname = 'ORD_METERINGCODE' then
+  begin
+    orgValue := AColumn.Value;
+    if length(AColumn.Value) = MeteringCodeLaenge then
+      ANewValue := AKundenImport.GetMappedMeteringCode(AColumn.Value)
+     else
+      ANewValue := AKundenImport.GetMappedMaloCode(AColumn.Value);
+    result := Acolumn.Value <> orgValue;
+  end
+  else
+  if (AColumn.Columnname = 'ORD_NACHRICHTENREFERENZNR') then
+  begin
+    orgValue := AColumn.Value;
+    ANewValue := AKundenImport.GetMappedEdiRef(AColumn.Value, 14);
+    result := Acolumn.Value <> orgValue;
+  end
+    else
+  if (AColumn.Columnname = 'ORD_NACHRICHTNR') then
+  begin
+    orgValue := AColumn.Value;
+    ANewValue := AKundenImport.GetMappedRechnungsNr(AColumn.Value, 35);
+    result := Acolumn.Value <> orgValue;
+  end
+    else
+  if (AColumn.Columnname = 'ord_refnr') or
+     (AColumn.Columnname = 'ord_vorgangrefnr') then
+  begin
+    orgValue := AColumn.Value;
+    ANewValue := AKundenImport.GetMappedEdiRef(AColumn.Value, 70);
+    result := Acolumn.Value <> orgValue;
+  end;
+end;
+
+
+{ TExportEDMSC }
+
+constructor TExportEDMSC.Create(AOwner: TExpImpObjectManager; ATableIdMapping: TelStringObjectMap<TTableIdMapping>);
+begin
+  inherited Create(AOwner, EDMSC, ATableIdMapping, TNachrichtenFormat.MSCONS);
+  FSelectEdNachricht := nil;
+  FSelectEdepv := nil;
+  AddMpidNummerCol('msc_sender_iln');
+  AddMpidNummerCol('msc_empf_iln');
+end;
+
+destructor TExportEDMSC.Destroy;
+begin
+  FreeAndNil(FSelectEdNachricht);
+  FreeAndNil(FSelectEdepv);
+  inherited;
+end;
+
+function TExportEDMSC.PrepareId(AConnection: TecConnection; AKundenExport: IKundenExport;
+  AId: TLongId; AExpImpManager: TExpImpObjectManager): boolean;
+begin
+  result := inherited PrepareId(AConnection, AKundenExport, AId, AExpImpManager);
+  if FSelectEdNachricht = nil then
+  begin
+     FSelectEdNachricht := AConnection.CreateSQLQuery;
+     FSelectEdNachricht.SQL.Text := 'SELECT DAT_ID, MSC_ID, MSC_SENDER_ILN, MSC_EMPF_ILN, MSC_ID_STORNOREF FROM ' + EDMSC  + ' WHERE MSC_ID = :MSC_ID OR MSC_ID_STORNOREF = :MSC_ID';
+     FSelectEdNachricht.DBPrepare;
+  end;
+
+  FSelectEdNachricht.ParamByName('MSC_ID').AsLongId := AId;
+  try
+    FSelectEdNachricht.open;
+    if not FSelectEdNachricht.Eof then
+    begin
+      if SelectIdForExport(FSelectEdNachricht.FieldByName('MSC_ID').AsLongId, 'TExportEDMSC, ' + AId.ToStr + ' MSC_ID') then
+         result := true;
+
+      if SelectIdForExport(FSelectEdNachricht.FieldByName('MSC_ID_STORNOREF').AsLongId, 'TExportEDMSC, ' + AId.ToStr + ' MSC_ID_STORNOREF') then
+         result := true;
+
+      if AExpImpManager.GetItemByIdentifier(EDDAT).SelectIdForExport(FSelectEdNachricht.FieldByName('DAT_ID').AsLongId, 'TExportEDMSC, ' + AId.ToStr + ' DAT_ID') then
+         result := true;
+
+
+       AKundenExport.AddToMprdList(FSelectEdNachricht.FieldByName('MSC_SENDER_ILN').AsString);
+       AKundenExport.AddToMprdList(FSelectEdNachricht.FieldByName('MSC_EMPF_ILN').AsString);
+    end;
+  finally
+    FSelectEdNachricht.Close;
+  end;
+end;
+
+function TExportEDMSC.GetNewColumnValue(ATable: TTAbleObj; AColumn: TColumnObj;
+  AKundenImport: IKundenImport; Var ANewValue: String; AForInsert: Boolean): Boolean;
+begin
+  result := inherited GetNewColumnValue(ATable, AColumn, AKundenImport, ANewValue, AForInsert);
+  if result then
+    exit;
+  if (AColumn.Columnname = 'MSC_NACHRICHTENREFERENZNR') or
+     (AColumn.Columnname = 'MSC_DATEIAUSTAUSCHREFERENZ') then
+  begin
+    ANewValue := AKundenImport.GetMappedEdiRef(AColumn.Value, 14);
+    result := Acolumn.Value <> ANewValue;
+  end
+   else
+  if (AColumn.Columnname = 'MSC_ORD_REF_NR') or
+     (AColumn.Columnname = 'MSC_STORNOREF_NR') or
+     (AColumn.Columnname = 'MSC_REFERENZNR') or
+     (AColumn.Columnname = 'MSC_UTLV_REF_NR') then
+  begin
+    ANewValue := AKundenImport.GetMappedEdiRef(AColumn.Value, 70);
+    result := Acolumn.Value <> ANewValue;
+  end
+   else
+  if (AColumn.Columnname = 'MSC_ID_STORNOREF') or
+     (AColumn.Columnname = 'MSC_ID_REF') then
+  begin
+    ANewValue := AKundenImport.GetMappedEdiRef(AColumn.Value, 12);
+    result := Acolumn.Value <> ANewValue;
+  end
+   else
+  if (AColumn.Columnname = 'MSC_NACHRICHTNR') or
+     (AColumn.Columnname = 'MSC_UTLVREFERENZNR') then
+  begin
+    ANewValue := AKundenImport.GetMappedEdiRef(AColumn.Value, 35);
+    result := Acolumn.Value <> ANewValue;
+  end;
+end;
+
+{ TExportEdNachrichtEpv }
+
+procedure TExportEdNachrichtEpv.AddMpidNummerCol(AColName: String);
+begin
+  AColName := UpperCase(AColName);
+  if FSenderEmpfFelder.IndexOf(AColName)<0 then
+    FSenderEmpfFelder.Add(AColName);
+end;
+
+constructor TExportEdNachrichtEpv.Create(AOwner: TExpImpObjectManager; ATable: String;  ATableIdMapping: TelStringObjectMap<TTableIdMapping>; ANachrichtenformat: TNachrichtenFormat);
+begin
+  inherited Create(AOwner, ATable, ATableIdMapping);
+  Init(Ord(ANachrichtenformat));
+end;
+
+constructor TExportEdNachrichtEpv.CreateWithoutEpvArt(AOwner: TExpImpObjectManager; ATable: String;
+  ATableIdMapping: TelStringObjectMap<TTableIdMapping>);
+begin
+  inherited Create(AOwner, ATable, ATableIdMapping);
+  init(-1);
+end;
+
+destructor TExportEdNachrichtEpv.Destroy;
+begin
+  FreeAndNil(FSelectEdepv);
+  FreeAndNil(FSenderEmpfFelder);
+  inherited;
+end;
+
+function TExportEdNachrichtEpv.GetNewColumnValue(ATable: TTAbleObj; AColumn: TColumnObj; AKundenImport: IKundenImport;
+  var ANewValue: String; AForInsert: Boolean): Boolean;
+begin
+  result := inherited GetNewColumnValue(ATable, AColumn, AKundenImport, ANewValue, AForInsert);
+  if result then
+    exit;
+
+  if FSenderEmpfFelder.IndexOf(AColumn.Columnname)>=0 then
+  begin
+    ANewValue := AKundenImport.GetMappedMpidNummer(AColumn.Value);
+    result := true;
+  end;
+end;
+
+procedure TExportEdNachrichtEpv.Init(AEpvArt: Integer);
+begin
+  FEpvArt := AEpvArt;
+  FSenderEmpfFelder := TStringList.Create;
+  FSelectEdepv := nil;
+end;
+
+function TExportEdNachrichtEpv.PrepareId(AConnection: TecConnection; AKundenExport: IKundenExport;
+  AId: TLongId; AExpImpManager: TExpImpObjectManager): boolean;
+begin
+  result := inherited PrepareId(AConnection, AKundenExport, AId, AExpImpManager);
+  if FEpvArt >= 0 then
+  begin
+    if FSelectEdepv = nil then
+    begin
+       FSelectEdepv := AConnection.CreateSQLQuery;
+       FSelectEdepv.SQL.Text := 'SELECT EPR_ID, EPV_ID FROM ' + EDEPV + ' WHERE EDI_ID = :EDI_ID' +
+                 IfThen(FEpvArt >= 0, ' AND EPV_ART = :EPV_ART', '');
+       FSelectEdepv.DBPrepare;
+    end;
+
+    FSelectEdepv.ParamByName('EDI_ID').AsLongId := AId;
+    FSelectEdepv.ParamByName('EPV_ART').AsInteger := FEpvArt;
+    try
+      FSelectEdepv.open;
+      while not FSelectEdepv.Eof do
+      begin
+        if AExpImpManager.ObjEdepr.SelectIdForExport(FSelectEdepv.FieldByName('EPR_ID').AsLongId, 'TExportEdNachrichtEpv, ' + TableName + ' / '  + AId.ToStr) then
+           result := true;
+        if AExpImpManager.ObjEdepv.SelectIdForExport(FSelectEdepv.FieldByName('EPV_ID').AsLongId, 'TExportEdNachrichtEpv, ' + TableName + ' / '  + AId.ToStr) then
+           result := true;
+        FSelectEdepv.Next;
+      end;
+    finally
+      FSelectEdepv.Close;
+    end;
+  end;
+end;
+
+{ TExportEDUTLV }
+
+constructor TExportEDUTLV.Create(AOwner: TExpImpObjectManager; ATableIdMapping: TelStringObjectMap<TTableIdMapping>);
+begin
+  inherited Create(AOwner, EDUTLV, ATableIdMapping, TNachrichtenformat.UTILMD);
+  FSelectEdNachricht := nil;
+  AddMpidNummerCol('utlv_prev_lief_iln');
+  AddMpidNummerCol('utlv_msb_iln');
+  AddMpidNummerCol('utlv_lif_iln');
+end;
+
+destructor TExportEDUTLV.Destroy;
+begin
+  FreeAndNil(FSelectEdNachricht);
+  inherited;
+end;
+
+function TExportEDUTLV.PrepareId(AConnection: TecConnection; AKundenExport: IKundenExport;
+  AId: TLongId; AExpImpManager: TExpImpObjectManager): boolean;
+begin
+  result := false;
+  if not CanDoExport then
+    exit;
+
+  if FSelectEdNachricht = nil then
+  begin
+     FSelectEdNachricht := AConnection.CreateSQLQuery;
+     FSelectEdNachricht.SQL.Text := 'SELECT UTL_ID FROM ' + EDUTLV  + ' WHERE UTLV_ID = :UTLV_ID';
+     FSelectEdNachricht.DBPrepare;
+  end;
+
+  result := inherited PrepareId(AConnection, AKundenExport, AId, AExpImpManager);
+
+  FSelectEdNachricht.ParamByName('UTLV_ID').AsLongId := AId;
+  try
+    FSelectEdNachricht.Open();
+    if not FSelectEdNachricht.Eof then
+    begin
+      if AExpImpManager.GetItemByIdentifier(EDUTL).SelectIdForExport(FSelectEdNachricht.FieldByName('UTL_ID').AsLongId, 'TExportEDUTLV, ' + AId.ToStr) then
+         result := true;
+    end;
+  finally
+    FSelectEdNachricht.Close;
+  end;
+end;
+
+function TExportEDUTLV.GetNewColumnValue(ATable: TTAbleObj; AColumn: TColumnObj;
+  AKundenImport: IKundenImport; Var ANewValue: String; AForInsert: Boolean): Boolean;
+begin
+  result := inherited GetNewColumnValue(ATable, AColumn, AKundenImport, ANewValue, AForInsert);
+  if result then
+    exit;
+
+  result := TExportEDULRefReplace.DoGetNewColumnValue(ATable, AColumn, AKundenImport, ANewValue, AForInsert);
+  if result then
+    exit;
+
+  if (AColumn.Columnname = 'UTLV_REFERENZ_ID') or
+     (AColumn.Columnname = 'UTLV_ANFRAGEREF_ID') or
+     (AColumn.Columnname = 'UTLV_VORGANGS_ID') then
+  begin
+    ANewValue:= AKundenImport.GetMappedEdiRef(AColumn.Value);
+    result := Acolumn.Value <> ANewValue;
+  end
+   else
+  if (AColumn.Columnname = 'UTLV_ORD_REF_NR') or
+     (AColumn.Columnname = 'UTLV_REF_NACHR_ANTWAUFBEST') then
+  begin
+    ANewValue := AKundenImport.GetMappedEdiRef(AColumn.Value, 70);
+    result := Acolumn.Value <> ANewValue;
+  end;
+
+end;
+
+{ TExportEDUTL }
+
+constructor TExportEDUTL.Create(AOwner: TExpImpObjectManager; ATableIdMapping: TelStringObjectMap<TTableIdMapping>);
+begin
+  inherited Create(AOwner, EDUTL, ATableIdMapping, TNachrichtenformat.UTIL);
+  FSelectEdNachricht := nil;
+  FAutoSelectChildIds := false;
+  AddMpidNummerCol('utl_sender_iln');
+  AddMpidNummerCol('utl_empf_iln');
+end;
+
+destructor TExportEDUTL.Destroy;
+begin
+  FreeAndNil(FSelectEdNachricht);
+  inherited;
+end;
+
+function TExportEDUTL.PrepareId(AConnection: TecConnection; AKundenExport: IKundenExport;
+  AId: TLongId; AExpImpManager: TExpImpObjectManager): boolean;
+begin
+  result := inherited PrepareId(AConnection, AKundenExport, AId, AExpImpManager);
+  if FSelectEdNachricht = nil then
+  begin
+     FSelectEdNachricht := AConnection.CreateSQLQuery;
+     FSelectEdNachricht.SQL.Text := 'SELECT DAT_ID, UTL_SENDER_ILN, UTL_EMPF_ILN FROM ' + EDUTL + ' WHERE UTL_ID = :UTL_ID';
+     FSelectEdNachricht.DBPrepare;
+  end;
+
+  FSelectEdNachricht.ParamByName('UTL_ID').AsLongId := AId;
+  try
+    FSelectEdNachricht.Open;
+    if not FSelectEdNachricht.Eof then
+    begin
+      if AExpImpManager.GetItemByIdentifier(EDDAT).SelectIdForExport(FSelectEdNachricht.FieldByName('DAT_ID').AsLongId, 'TExportEDUTL, ' + AId.ToStr) then
+         result := true;
+       AKundenExport.AddToMprdList(FSelectEdNachricht.FieldByName('UTL_SENDER_ILN').AsString);
+       AKundenExport.AddToMprdList(FSelectEdNachricht.FieldByName('UTL_EMPF_ILN').AsString);
+    end;
+  finally
+    FSelectEdNachricht.Close;
+  end;
+end;
+
+{ TExportENKZB }
+
+constructor TExportENKZB.Create(AOwner: TExpImpObjectManager; ATableIdMapping: TelStringObjectMap<TTableIdMapping>);
+begin
+  inherited Create(AOwner, ENKZB, ATableIdMapping);
+  FSelectEdepv := nil;
+end;
+
+destructor TExportENKZB.Destroy;
+begin
+  FreeAndNil(FSelectEdepv);
+  inherited;
+end;
+
+function TExportENKZB.DoInitialSelectByKndIds(AConnection: TecConnection; AMndId: Integer;
+  AKndIds: TelSimpleLongIdList): Integer;
+var qry: TSqlQuery;
+    i: integer;
+begin
+  result := 0;
+  qry := AConnection.CreateSQLQuery;
+  try
+    qry.SQL.Text :='SELECT KZB_ID FROM ' + ENKZB + ' WHERE KND_ID = :KND_ID AND MND_ID = ' + IntToStr(AMndId);
+    qry.DBPrepare;
+    for i := 0 to AKndIds.Count - 1 do
+    begin
+      qry.Params[0].AsLongId := AKndIds[i];
+      try
+        qry.Open;
+        while not qry.Eof do
+        begin
+          if SelectIdForExport(qry.Fields[0].AsLongId, 'TExportENKZB.DoInitialSelectByKndIds, ' + AKndIds[i].ToStr) then
+            inc(result);
+          qry.Next;
+        end;
+      finally
+        qry.Close;
+      end;
+    end;
+  finally
+    qry.Free;
+  end;
+end;
+
+function TExportENKZB.PrepareId(AConnection: TecConnection; AKundenExport: IKundenExport;
+  AId: TLongId; AExpImpManager: TExpImpObjectManager): boolean;
+begin
+  result := inherited PrepareId(AConnection, AKundenExport, AId, AExpImpManager);
+  if FOwner.ExportOptionen.DoNachrichtenExport then
+  begin
+    if FSelectEdepv = nil then
+    begin
+       FSelectEdepv := AConnection.CreateSQLQuery;
+       FSelectEdepv.SQL.Text := 'SELECT epr.EPR_ID, EDI_ID FROM ' + EDEPR + ' epr JOIN ' + EDEPV + ' epv on epv.epr_id = epr.epr_id ' + CR_LF +
+                                ' WHERE KZB_ID = :KZB_ID ' + CR_LF +
+                                ' AND EPV_ART = 1'; // EDUTLV
+       FSelectEdepv.DBPrepare;
+    end;
+
+    FSelectEdepv.ParamByName('KZB_ID').AsLongId := AId;
+    try
+      FSelectEdepv.Open();
+      while not FSelectEdepv.Eof do
+      begin
+        if AExpImpManager.ObjEdepr.SelectIdForExport(FSelectEdepv.FieldByName('EPR_ID').AsLongId, 'TExportENKZB, ' + AId.ToStr) then
+           result := true;
+        if AExpImpManager.ObjEdepv.SelectIdForExport(FSelectEdepv.FieldByName('EDI_ID').AsLongId, 'TExportENKZB, ' + AId.ToStr) then
+           result := true;
+        if AExpImpManager.GetItemByIdentifier(EDUTLV).SelectIdForExport(FSelectEdepv.FieldByName('EDI_ID').AsLongId, 'TExportENKZB, ' + AId.ToStr) then
+           result := true;
+        FSelectEdepv.Next;
+      end;
+    finally
+      FSelectEdepv.Close;
+    end;
+  end;
+end;
+
+{ TExportENKZE }
+
+constructor TExportENKZE.Create(AOwner: TExpImpObjectManager; ATableIdMapping: TelStringObjectMap<TTableIdMapping>);
+begin
+  inherited Create(AOwner, ENKZE, ATableIdMapping);
+  FSelectEdepv := nil;
+  FSelectKze := nil;
+end;
+
+destructor TExportENKZE.Destroy;
+begin
+  FreeAndNil(FSelectEdepv);
+  FreeAndNil(FSelectKze);
+  inherited;
+end;
+
+function TExportENKZE.DoInitialSelectByKndIds(AConnection: TecConnection; AMndId: Integer;
+  AKndIds: TelSimpleLongIdList): Integer;
+var qry: TSqlQuery;
+    i: integer;
+begin
+  result := 0;
+  qry := AConnection.CreateSQLQuery;
+  try
+    qry.SQL.Text :='SELECT KZE_ID FROM ' + ENKZE + ' WHERE KND_ID = :KND_ID AND MND_ID = ' + IntToStr(AMndId);
+    qry.DBPrepare;
+    for i := 0 to AKndIds.Count - 1 do
+    begin
+      qry.Params[0].AsLongId := AKndIds[i];
+      try
+        qry.Open;
+        while not qry.Eof do
+        begin
+          if SelectIdForExport(qry.Fields[0].AsLongId, 'TExportENKZE, DoInitialSelectByKndIds ' + AKndIds[i].ToStr) then
+            inc(result);
+          qry.Next;
+        end;
+      finally
+        qry.Close;
+      end;
+    end;
+  finally
+    qry.Free;
+  end;
+end;
+
+function TExportENKZE.PrepareId(AConnection: TecConnection; AKundenExport: IKundenExport;
+  AId: TLongId; AExpImpManager: TExpImpObjectManager): boolean;
+var kndExpObj: TExpImpTableObj;
+begin
+  result := inherited PrepareId(AConnection, AKundenExport, AId, AExpImpManager);
+  if FOwner.ExportOptionen.DoNachrichtenExport then
+  begin
+    if FSelectEdepv = nil then
+    begin
+       FSelectEdepv := AConnection.CreateSQLQuery;
+       FSelectEdepv.SQL.Text := 'SELECT epr.EPR_ID, EDI_ID FROM ' + EDEPR + ' epr JOIN ' + EDEPV + ' epv on epv.epr_id = epr.epr_id ' + CR_LF +
+                                ' WHERE KZE_ID = :KZE_ID ' + CR_LF +
+                                ' AND EPV_ART = 1'; // EDUTLV
+       FSelectEdepv.DBPrepare;
+    end;
+
+    FSelectEdepv.ParamByName('KZE_ID').AsLongId := AId;
+    try
+      FSelectEdepv.Open;
+      while not FSelectEdepv.Eof do
+      begin
+        if AExpImpManager.ObjEdepr.SelectIdForExport(FSelectEdepv.FieldByName('EPR_ID').AsLongId, 'TExportENKZE, ' + AId.ToStr) then
+           result := true;
+        if AExpImpManager.ObjEdepv.SelectIdForExport(FSelectEdepv.FieldByName('EDI_ID').AsLongId, 'TExportENKZE, ' + AId.ToStr) then
+           result := true;
+        if AExpImpManager.GetItemByIdentifier(EDUTLV).SelectIdForExport(FSelectEdepv.FieldByName('EDI_ID').AsLongId, 'TExportENKZE, ' + AId.ToStr) then
+           result := true;
+        FSelectEdepv.Next;
+      end;
+    finally
+      FSelectEdepv.Close;
+    end;
+  end;
+
+  if FSelectKze = nil then
+  begin
+     FSelectKze := AConnection.CreateSQLQuery;
+     FSelectKze.SQL.Text := 'SELECT KZE_ID, KZE_NACHFOLGERKND_ID, KZE_NACHFOLGERKZB_ID FROM ' + ENKZE + ' WHERE KZE_ID = :KZE_ID';
+     FSelectKze.DBPrepare;
+  end;
+
+  FSelectKze.ParamByName('KZE_ID').AsLongId := AId;
+  try
+    FSelectKze.Open;
+    while not FSelectKze.Eof do
+    begin
+      kndExpObj :=  AExpImpManager.GetItemByIdentifier(ENKND);
+      if (kndExpObj <> nil) and kndExpObj.SelectIdForExport(FSelectKze.FieldByName('KZE_NACHFOLGERKND_ID').AsLongId, 'TExportENKZE, ' + AId.ToStr) then
+         result := true;
+      if AExpImpManager.GetItemByIdentifier(ENKZB).SelectIdForExport(FSelectKze.FieldByName('KZE_NACHFOLGERKZB_ID').AsLongId, 'TExportENKZE, ' + AId.ToStr) then
+         result := true;
+      FSelectKze.Next;
+    end;
+  finally
+    FSelectKze.Close;
+  end;
+end;
+
+{ TExportEDUTZP }
+
+constructor TExportEDUTZP.Create(AOwner: TExpImpObjectManager; ATableIdMapping: TelStringObjectMap<TTableIdMapping>);
+begin
+  inherited CreateWithoutEpvArt(AOwner, EDUTZP, ATableIdMapping);
+  FSelectTreIdSreId := nil;
+  FAutoPrepareParentIds := true; // Utlvs
+end;
+
+destructor TExportEDUTZP.Destroy;
+begin
+  FreeAndNil(FSelectTreIdSreId);
+  inherited;
+end;
+
+function TExportEDUTZP.DoInitialSelectByMlkIds(AConnection: TecConnection; AMndId: Integer;
+  AMlkIds: TelSimpleLongIdList): Integer;
+var qry: TSqlQuery;
+    i: integer;
+begin
+  result := 0;
+  if not FOwner.ExportOptionen.DoNachrichtenExport then
+    exit;
+
+  qry := AConnection.CreateSQLQuery;
+  try
+    qry.SQL.Text :='SELECT UTZP_ID FROM ' + EDUTZP + ' WHERE MLK_ID = :MLK_ID AND MND_ID = ' + IntToStr(AMndId);
+    qry.DBPrepare;
+    for i := 0 to AMlkIds.Count - 1 do
+    begin
+      qry.Params[0].AsLongId := AMlkIds[i];
+      try
+        qry.Open;
+        while not qry.Eof do
+        begin
+          if SelectIdForExport(qry.Fields[0].AsLongId, 'TExportEDUTZP.DoInitialSelectByMlkIds(' + IntToStr(AMndId) + '), MlkId: ' + AMlkIds[i].ToStr) then
+            inc(result);
+          qry.Next;
+        end;
+      finally
+        qry.Close;
+      end;
+    end;
+  finally
+    qry.Free;
+  end;
+end;
+
+function TExportEDUTZP.DoInitialSelectByZptIds(AConnection: TecConnection; AMndId: Integer;
+  AZptIds: TelSimpleLongIdList): Integer;
+var qry: TSqlQuery;
+    i: integer;
+begin
+  result := 0;
+  if not FOwner.ExportOptionen.DoNachrichtenExport then
+    exit;
+
+  qry := AConnection.CreateSQLQuery;
+  try
+    qry.SQL.Text :='SELECT UTZP_ID FROM ' + EDUTZP + ' WHERE ZPT_ID = :ZPT_ID AND MND_ID = ' + IntToStr(AMndId);
+    qry.DBPrepare;
+    for i := 0 to AZptIds.Count - 1 do
+    begin
+      qry.Params[0].AsLongId := AZptIds[i];
+      try
+        qry.Open;
+        while not qry.Eof do
+        begin
+          if SelectIdForExport(qry.Fields[0].AsLongId, 'TExportEDUTZP.DoInitialSelectByZptIds(' + IntToStr(AMndId) + '), ZptId: ' + AZptIds[i].ToStr) then
+            inc(result);
+          qry.Next;
+        end;
+      finally
+        qry.Close;
+      end;
+    end;
+  finally
+    qry.Free;
+  end;
+end;
+
+function TExportEDUTZP.PrepareId(AConnection: TecConnection; AKundenExport: IKundenExport;
+  AId: TLongId; AExpImpManager: TExpImpObjectManager): boolean;
+begin
+  result := inherited PrepareId(AConnection, AKundenExport, AId, AExpImpManager);
+  if FSelectTreIdSreId = nil then
+  begin
+     FSelectTreIdSreId := AConnection.CreateSQLQuery;
+     FSelectTreIdSreId.SQL.Text := 'SELECT SRE_ID, TRE_ID FROM ' + EDUTZP + ' WHERE UTZP_ID = :UTZP_ID';
+     FSelectTreIdSreId.DBPrepare;
+  end;
+
+  FSelectTreIdSreId.ParamByName('UTZP_ID').AsLongId := AId;
+  try
+    FSelectTreIdSreId.Open();
+    if not FSelectTreIdSreId.Eof then
+    begin
+      if AExpImpManager.GetItemByIdentifier(ENTRE).SelectIdForExport(FSelectTreIdSreId.FieldByName('TRE_ID').AsLongId, 'TExportEDUTZP, ' + AId.ToStr) then
+         result := true;
+      if AExpImpManager.GetItemByIdentifier(ENSRE).SelectIdForExport(FSelectTreIdSreId.FieldByName('SRE_ID').AsLongId, 'TExportEDUTZP, ' + AId.ToStr) then
+         result := true;
+    end;
+  finally
+    FSelectTreIdSreId.Close;
+  end;
+end;
+
+function TExportEDUTZP.GetNewColumnValue(ATable: TTAbleObj; AColumn: TColumnObj;
+  AKundenImport: IKundenImport; Var ANewValue: String; AForInsert: Boolean): Boolean;
+begin
+  result := inherited GetNewColumnValue(ATable, AColumn, AKundenImport, ANewValue, AForInsert);
+  if result then
+    exit;
+
+  if AColumn.Columnname = 'UTZP_METERINGCODE' then
+  begin
+    if length(EntferneHochkomma(AColumn.Value)) = MeteringCodeLaenge then
+      ANewValue := AKundenImport.GetMappedMeteringCode(AColumn.Value)
+     else
+      ANewValue := AKundenImport.GetMappedMaloCode(AColumn.Value);
+    result := Acolumn.Value <> ANewValue;
+  end
+   else
+  result := TExportEDULRefReplace.DoGetNewColumnValue(ATable, AColumn, AKundenImport, ANewValue, AForInsert);
+end;
+
+{ TTableIdMapping }
+
+procedure TTableIdMapping.Clear;
+begin
+  IdMapping.Clear;
+end;
+
+constructor TTableIdMapping.Create(ATableName, AIdFieldName, ASequenceName: String);
+begin
+  FTableName := ATableName;
+  FIdFieldName := AIdFieldName;
+  FSequenceName := ASequenceName;
+  FIdMapping := TIdMapping.Create;
+  FDTable := TDBModelUtils.GetTables.Find(TableName);
+  if FDTable = nil then
+    raise EInvalidOperation.Create('Tabelle ' + ATableName + ' nicht in DB-Modell gefunden');
+end;
+
+destructor TTableIdMapping.Destroy;
+begin
+  IdMapping.Free;
+end;
+
+function TTableIdMapping.IsRelevant(ATableName, AColumnName: String): Boolean;
+var i: Integer;
+begin
+  result := false;
+  if (ATableName = TableName) and (AColumnName = IdFieldName) then
+  begin
+    result := true;
+    exit;
+  end;
+  if FDTable <> nil then
+  begin
+    for i := 0 to FDTable.ReferencedBy.Count - 1 do
+      if FDTable.ReferencedBy[i].FKTableSchema + '.' + FDTable.ReferencedBy[i].FKTable = ATableName then
+      begin
+        if length(FDTable.ReferencedBy[i].FKFieldnames) <> 1 then
+            raise EInvalidOperation.Create('length(FDTable.ReferencedBy[i].FKFieldnames) <> 1  wird nicht unterstützt!');
+        if (AColumnName = FDTable.ReferencedBy[i].FKFieldnames[0]) then
+        begin
+          result := true;
+          break;
+        end;
+      end;
+  end;
+end;
+
+{ TExportEdepv }
+
+function TExportEdepv.CanDoImport(ATable: TTAbleObj; AKundenImport: IKundenImport): Boolean;
+var column: TColumnObj;
+    newValue: String;
+begin
+  result := inherited CanDoImport(ATable, AKundenImport);
+  if result then
+  begin
+    column := ATable.GetColumnByName('EPV_ART', false);
+    if column <> nil then
+    begin
+      result := FEpvArt2Obj.ContainsKey(StrToIntDef(column.Value, -1));
+      if result then
+      begin
+        result := GetNewColumnValue(ATable, ATable.GetColumnByName('EDI_ID'), AKundenImport, newValue, false);
+        // SonderLocke: Nur Importieren, falls "Übersetzbar"
+      end;
+    end
+    else
+      result := False;
+  end;
+end;
+
+constructor TExportEdepv.Create(AOwner: TExpImpObjectManager; ATableIdMapping: TelStringObjectMap<TTableIdMapping>);
+begin
+  inherited Create(AOwner, EDEPV, ATableIdMapping);
+  FEpvArt2Obj := TelIntegerObjectMap<TExpImpTableObj>.Create(False);
+end;
+
+destructor TExportEdepv.Destroy;
+begin
+  FEpvArt2Obj.Free;
+  inherited;
+end;
+
+function TExportEdepv.GetNewColumnValue(ATable: TTAbleObj; AColumn: TColumnObj;
+  AKundenImport: IKundenImport; Var ANewValue: String; AForInsert: Boolean): Boolean;
+var column: TColumnObj;
+    orgId, id: Int64;
+    art: Integer;
+begin
+  result := inherited GetNewColumnValue(ATable, AColumn, AKundenImport, ANewValue, AForInsert);
+  if result then
+    exit;
+
+  if ATable.Tablename <> TableName then
+    exit;
+
+  if AColumn.Columnname <> 'EDI_ID' then
+    exit;
+
+  orgId := StrToIntDef(AColumn.Value, NULL_INTEGER);
+  id := orgId;
+  column := ATable.GetColumnByName('EPV_ART');
+  art := StrToIntDef(column.Value, -1);
+  if FEpvArt2Obj.ContainsKey(art) then
+     result := FEpvArt2Obj.Values[art].TableIdMapping.IdMapping.TryGetValue(orgId, id);
+
+  if result then
+    ANewValue := IntToStr(id);
+end;
+
+procedure TExportEdepv.RegisterEpvArtObj(AObj: TExpImpTableObj; AEpvArt: Integer);
+begin
+  if (AObj = nil) or (AEpvArt < 0) then exit;
+
+  if FEpvArt2Obj.ContainsKey(AEpvArt) then
+    raise EInvalidArgument.Create('RegisterEpvArtObj: Es existiert bereits ein Eintrag für die EpvArt ' + IntTostr(AEpvArt));
+  FEpvArt2Obj.Add(AEpvArt, AObj)
+end;
+
+{ TExportEDMSZP }
+
+constructor TExportEDMSZP.Create(AOwner: TExpImpObjectManager; ATableIdMapping: TelStringObjectMap<TTableIdMapping>);
+begin
+  inherited CreateWithoutEpvArt(AOwner, EDMSZP, ATableIdMapping);
+  FAutoPrepareParentIds := true;
+end;
+
+function TExportEDMSZP.GetNewColumnValue(ATable: TTAbleObj; AColumn: TColumnObj;
+  AKundenImport: IKundenImport; Var ANewValue: String; AForInsert: Boolean): Boolean;
+begin
+  result := inherited GetNewColumnValue(ATable, AColumn, AKundenImport, ANewValue, AForInsert);
+  if result then
+    exit;
+
+  if AColumn.Columnname = 'MSZP_METERINGCODE' then
+  begin
+    if length(EntferneHochkomma(AColumn.Value)) = MeteringCodeLaenge then
+      ANewValue := AKundenImport.GetMappedMeteringCode(AColumn.Value)
+     else
+      ANewValue := AKundenImport.GetMappedMaloCode(AColumn.Value);
+
+    result := Acolumn.Value <> ANewValue;
+  end;
+end;
+
+{ TExportEDDAT }
+
+function TExportEDDAT.PrepareId(AConnection: TecConnection; AKundenExport: IKundenExport;
+  AId: TLongId; AExpImpManager: TExpImpObjectManager): Boolean;
+begin
+  result := inherited PrepareId(AConnection, AKundenExport, AId, AExpImpManager);
+  if PrepareParentId(AConnection, AId, AExpImpManager.GetItemByIdentifier(EDCTR), 'CTR_ID') then
+    result := true;
+end;
+
+constructor TExportEDDAT.Create(AOwner: TExpImpObjectManager; ATableIdMapping: TelStringObjectMap<TTableIdMapping>);
+begin
+  inherited Create(AOwner, EDDAT, ATableIdMapping, TNachrichtenFormat.EDIDATEI);
+  AddMpidNummerCol('dat_sender_iln');
+  AddMpidNummerCol('dat_empf_iln');
+end;
+
+function TExportEDDAT.GetNewColumnValue(ATable: TTAbleObj; AColumn: TColumnObj;
+  AKundenImport: IKundenImport; Var ANewValue: String; AForInsert: Boolean): Boolean;
+begin
+  result := inherited GetNewColumnValue(ATable, AColumn, AKundenImport, ANewValue, AForInsert);
+
+  if result then
+    exit;
+
+  if (AColumn.Columnname = 'DAT_DATEINAME') or
+     (AColumn.Columnname = 'DAT_DATEINAME_SUCHFELD') then
+  begin
+    ANewValue := AKundenImport.GetMappedDateiName(AColumn.Value);
+    result := Acolumn.Value <> ANewValue;
+  end;
+end;
+
+{ TExportEDULRefReplace }
+
+class function TExportEDULRefReplace.DoGetNewColumnValue(ATable: TTAbleObj; AColumn: TColumnObj;
+  AKundenImport: IKundenImport; Var ANewValue: String; AForInsert: Boolean): Boolean;
+begin
+  result := false;
+  if AnsiEndsText('_METERINGCODE', AColumn.Columnname) or
+     AnsiEndsText('_REFMELO', AColumn.Columnname) or
+     AnsiEndsText('_REF_MELO', AColumn.Columnname) or
+     AnsiEndsText('_METERINGCODE2', AColumn.Columnname) then
+  begin
+    ANewValue := AKundenImport.GetMappedMeteringCode(AColumn.Value);
+    result := Acolumn.Value <> ANewValue;
+  end
+    else
+  if AnsiEndsText('_MARKTLOKATION', AColumn.Columnname) or
+     AnsiEndsText('_REF_MALO', AColumn.Columnname) or
+     AnsiEndsText('_REFMALO', AColumn.Columnname) or
+     AnsiEndsText('_REFTRANCHE', AColumn.Columnname) then
+  begin
+    ANewValue := AKundenImport.GetMappedMaloCode(AColumn.Value);
+    result := Acolumn.Value <> ANewValue;
+  end
+   else
+  if AnsiEndsText('_REF_TR', AColumn.Columnname)  then
+  begin
+    ANewValue := AKundenImport.GetMappedTreCode(AColumn.Value);
+    result := Acolumn.Value <> ANewValue;
+  end
+   else
+  if AnsiEndsText('_REF_NELO', AColumn.Columnname)  then
+  begin
+    ANewValue := AKundenImport.GetMappedNeloCode(AColumn.Value);
+    result := Acolumn.Value <> ANewValue;
+  end
+   else
+  if AnsiEndsText('_REF_SR', AColumn.Columnname)  then
+  begin
+   ANewValue := AKundenImport.GetMappedSreCode(AColumn.Value);
+    result := Acolumn.Value <> ANewValue;
+  end
+   else
+  if AnsiEndsText('_ZAEHLERNUMMER', AColumn.Columnname) or
+     AnsiEndsText('SUCHF_ZAENR', AColumn.Columnname) or
+     AnsiEndsText('_REFZAENR', AColumn.Columnname) or
+     AnsiEndsText('_REFMUNR', AColumn.Columnname) or
+     AnsiEndsText('_REFSMG', AColumn.Columnname) or
+     AnsiEndsText('SMGW_NR', AColumn.Columnname) or
+     AnsiEndsText('UTMG_NUMMER', AColumn.Columnname) or
+     AnsiEndsText('_GERAETENUMMER', AColumn.Columnname) or
+     AnsiEndsText('_GERAETENUMMER1', AColumn.Columnname) or
+     AnsiEndsText('_GERAETENUMMER2', AColumn.Columnname) or
+     AnsiEndsText('_GERAETENUMMER3', AColumn.Columnname) then
+  begin
+    ANewValue := AKundenImport.GetMappedGeraeteNr(AColumn.Value);
+    result := Acolumn.Value <> ANewValue;
+  end
+end;
+
+function TExportEDULRefReplace.GetNewColumnValue(ATable: TTAbleObj; AColumn: TColumnObj;
+  AKundenImport: IKundenImport; Var ANewValue: String; AForInsert: Boolean): Boolean;
+begin
+  result := inherited GetNewColumnValue(ATable, AColumn, AKundenImport, ANewValue, AForInsert);
+  if result then
+    exit;
+  result := DoGetNewColumnValue(ATable, AColumn, AKundenImport, ANewValue, AForInsert);
+end;
+
+{ TExportENTRE }
+
+constructor TExportENTRE.Create(AOwner: TExpImpObjectManager; ATableIdMapping: TelStringObjectMap<TTableIdMapping>);
+begin
+  inherited Create(AOwner, ENTRE, ATableIdMapping);
+  FSelectSreUndAbn := nil;
+end;
+
+destructor TExportENTRE.Destroy;
+begin
+  FreeAndNil(FSelectSreUndAbn);
+  inherited;
+end;
+
+function TExportENTRE.DoInitialSelectByMlkIds(AConnection: TecConnection; AMndId: Integer;
+  AMlkIds: TelSimpleLongIdList): Integer;
+begin
+  result := DoInitialSelect(AConnection, 'SELECT TRE_ID FROM ' + ENTRMA + ' WHERE MLK_ID = :MLK_ID', 'MLK_ID', AMlkIds)
+end;
+
+function TExportENTRE.DoInitialSelectByZptIds(AConnection: TecConnection; AMndId: Integer;
+  AZptIds: TelSimpleLongIdList): Integer;
+begin
+  result := DoInitialSelect(AConnection, 'SELECT TRE_ID FROM ' + ENTRME + ' WHERE ZPT_ID = :ZPT_ID', 'ZPT_ID', AZptIds)
+end;
+
+function TExportENTRE.GetNewColumnValue(ATable: TTAbleObj; AColumn: TColumnObj;
+  AKundenImport: IKundenImport; Var ANewValue: String; AForInsert: Boolean): Boolean;
+begin
+  result := inherited GetNewColumnValue(ATable, AColumn, AKundenImport, ANewValue, AForInsert);
+  if result then
+    exit;
+
+  if (AColumn.Columnname = 'TRE_TR_ID')  then
+  begin
+    ANewValue := AKundenImport.GetMappedTreCode(AColumn.Value);
+    result := Acolumn.Value <> ANewValue;
+  end;
+end;
+
+function TExportENTRE.PrepareId(AConnection: TecConnection; AKundenExport: IKundenExport; AId: TLongId;
+  AExpImpManager: TExpImpObjectManager): boolean;
+
+begin
+  Result := inherited PrepareId(AConnection, AKundenExport, AId, AExpImpManager);
+  if FSelectSreUndAbn = nil then
+  begin
+     FSelectSreUndAbn := AConnection.CreateSQLQuery;
+     FSelectSreUndAbn.SQL.Text := 'SELECT tre.ABN_ID, trd.NLK_ID, trd.SRE_ID FROM ' + ENTRE + ' tre JOIN ' + ENTRD + ' trd ON tre.tre_id = trd.tre_id WHERE tre.TRE_ID = :TRE_ID';
+     FSelectSreUndAbn.DBPrepare;
+  end;
+
+  FSelectSreUndAbn.ParamByName('TRE_ID').AsLongId := AId;
+  try
+    FSelectSreUndAbn.Open();
+    if not FSelectSreUndAbn.Eof then
+    begin
+      if SelectOther(FSelectSreUndAbn, ENABN, 'ABN_ID', AConnection, AKundenExport, AExpImpManager) then
+        result := true;
+      if SelectOther(FSelectSreUndAbn, ENNLK, 'NLK_ID', AConnection, AKundenExport, AExpImpManager) then
+        result := true;
+      if SelectOther(FSelectSreUndAbn, ENSRE, 'SRE_ID', AConnection, AKundenExport, AExpImpManager) then
+        result := true;
+    end;
+  finally
+    FSelectSreUndAbn.Close;
+  end;
+end;
+
+{ TExportENSRE }
+
+constructor TExportENSRE.Create(AOwner: TExpImpObjectManager; ATableIdMapping: TelStringObjectMap<TTableIdMapping>);
+begin
+  inherited Create(AOwner, ENSRE, ATableIdMapping);
+  FSelectAbn := nil;
+end;
+
+destructor TExportENSRE.Destroy;
+begin
+  FreeAndNil(FSelectAbn);
+  inherited;
+end;
+
+function TExportENSRE.GetNewColumnValue(ATable: TTAbleObj; AColumn: TColumnObj;
+  AKundenImport: IKundenImport; Var ANewValue: String; AForInsert: Boolean): Boolean;
+begin
+  result := inherited GetNewColumnValue(ATable, AColumn, AKundenImport, ANewValue, AForInsert);
+  if result then
+    exit;
+  if (AColumn.Columnname = 'SRE_SR_ID')  then
+  begin
+    ANewValue := AKundenImport.GetMappedSreCode(AColumn.Value);
+    result := Acolumn.Value <> ANewValue;
+  end;
+end;
+
+function TExportENSRE.PrepareId(AConnection: TecConnection; AKundenExport: IKundenExport; AId: TLongId;
+  AExpImpManager: TExpImpObjectManager): boolean;
+
+begin
+  Result := inherited PrepareId(AConnection, AKundenExport, AId, AExpImpManager);
+  if FSelectAbn = nil then
+  begin
+     FSelectAbn := AConnection.CreateSQLQuery;
+     FSelectAbn.SQL.Text := 'SELECT ABN_ID FROM ' + ENSRE + ' WHERE SRE_ID = :SRE_ID';
+     FSelectAbn.DBPrepare;
+  end;
+
+  FSelectAbn.ParamByName('SRE_ID').AsLongId := AId;
+  try
+    FSelectAbn.Open();
+    if not FSelectAbn.Eof then
+    begin
+      if SelectOther(FSelectAbn,  ENABN, 'ABN_ID', AConnection, AKundenExport, AExpImpManager) then
+        result := true;
+    end;
+  finally
+    FSelectAbn.Close;
+  end;
+end;
+
+function TExportENSRE.DoInitialSelectByAbnIds(AConnection: TecConnection; AAbnIds: TelSimpleLongIdList): Integer;
+begin
+  result := DoInitialSelect(AConnection, 'SELECT SRE_ID FROM ' + ENSRE + ' WHERE ABN_ID = :ABN_ID', 'ABN_ID', AAbnIds);
+end;
+
+{ TExportENZptAbh }
+
+function TExportENZptAbh.AddZptIdFieldName(AZptIdFieldName: String): TExportENZptAbh;
+begin
+  AZptIdFieldName := UpperCase(AZptIdFieldName);
+  if (AZptIdFieldName <> '') and
+     (FZptIdFieldNames.IndexOf(AZptIdFieldName) <0) then
+     FZptIdFieldNames.Add(AZptIdFieldName);
+  result := Self;
+end;
+
+constructor TExportENZptAbh.Create(AOwner: TExpImpObjectManager; ATableName: String;
+  ATableIdMapping: TelStringObjectMap<TTableIdMapping>; AZptIdFieldName: String);
+begin
+  inherited Create(AOwner, ATableName, ATableIdMapping);
+  FZptIdFieldNames := TStringList.Create;
+  AddZptIdFieldName(AZptIdFieldName);
+end;
+
+destructor TExportENZptAbh.Destroy;
+begin
+  FZptIdFieldNames.Free;
+  inherited;
+end;
+
+function TExportENZptAbh.DoInitialSelectByZptIds(AConnection: TecConnection; AMndId: Integer;
+  AZptIds: TelSimpleIntegerList): Integer;
+var i: integer;
+begin
+  result := 0;
+  for i := 0 to FZptIdFieldNames.Count - 1 do
+    result := result +  DoInitialSelect(AConnection,  'SELECT ' + FIdFeldName + ' FROM ' + FTableName + ' WHERE ' + FZptIdFieldNames[i] + ' = :ZPT_ID', 'ZPT_ID', AZptIds);
+end;
+
+{ TExportEDCTR }
+
+function TExportEDCTR.CanDoImport(ATable: TTAbleObj; AKundenImport: IKundenImport): Boolean;
+begin
+  result := false; // Hierfür bräuchten wir ein "INSERT EDDAT OHNE CTR_ID mit späterem UPDATE CTR_ID". Todo MKI inherited CanDoImport(ATable);
+end;
+
+constructor TExportEDCTR.Create(AOwner: TExpImpObjectManager; ATableIdMapping: TelStringObjectMap<TTableIdMapping>);
+begin
+  inherited Create(AOwner, EDCTR, ATableIdMapping, TNachrichtenFormat.CONTRL);
+  AddMpidNummerCol('ctr_sender_iln');
+  AddMpidNummerCol('ctr_empf_iln');
+  AddMpidNummerCol('ctr_ref_sender_iln');
+  AddMpidNummerCol('ctr_ref_empf_iln');
+end;
+
+function TExportEDCTR.GetNewColumnValue(ATable: TTAbleObj; AColumn: TColumnObj;
+  AKundenImport: IKundenImport; Var ANewValue: String; AForInsert: Boolean): Boolean;
+begin
+  result := inherited GetNewColumnValue(ATable, AColumn, AKundenImport, ANewValue, AForInsert);
+  if result then
+    exit;
+
+  if (AColumn.Columnname = 'CTR_DATEINAME') then
+  begin
+    ANewValue := AKundenImport.GetMappedDateiName(AColumn.Value);
+    result := Acolumn.Value <> ANewValue;
+  end
+  else
+  if (AColumn.Columnname = 'CTR_DATEIAUSTAUSCHREFERENZ') or
+      (AColumn.Columnname = 'CTR_REF_DATEIAUSTAUSCHREF') then
+  begin
+    ANewValue := AKundenImport.GetMappedEdiRef(AColumn.Value, 35);
+    result := Acolumn.Value <> ANewValue;
+  end
+   else
+  if (AColumn.Columnname = 'CTR_NACHRICHTENREFERENZNR') then
+  begin
+    ANewValue := AKundenImport.GetMappedEdiRef(AColumn.Value, 14);
+    result := Acolumn.Value <> ANewValue;
+  end
+end;
+
+  { TExportEDQUO }
+constructor TExportEDQUO.Create(AOwner: TExpImpObjectManager; ATableIdMapping: TelStringObjectMap<TTableIdMapping>);
+begin
+  inherited Create(AOwner, EDQUO, ATableIdMapping, TNachrichtenformat.QUOTES);
+  FSelectEdNachricht := nil;
+  AddMpidNummerCol('quo_sender_iln');
+  AddMpidNummerCol('quo_empf_iln');
+end;
+
+destructor TExportEDQUO.Destroy;
+begin
+  FreeAndNil(FSelectEdNachricht);
+  inherited;
+end;
+
+function TExportEDQUO.DoInitialSelectByMlkIds(AConnection: TecConnection; AMndId: Integer; AMlkIds: TelSimpleLongIdList): Integer;
+var
+  Qry: TSqlQuery;
+  I: Integer;
+begin
+  Result := 0;
+  if not FOwner.ExportOptionen.DoNachrichtenExport then
+    exit;
+
+  Qry := AConnection.CreateSQLQuery;
+  try
+    Qry.SQL.Text :='SELECT QUO_ID FROM ' + EDQUO + ' WHERE MLK_ID = :MLK_ID AND MND_ID = ' + IntToStr(AMndId);
+    Qry.DBPrepare;
+    for I := 0 to AMlkIds.Count - 1 do
+    begin
+      Qry.Params[0].AsLongId := AMlkIds[I];
+      try
+        Qry.Open;
+        while not Qry.Eof do
+        begin
+          if SelectIdForExport(Qry.Fields[0].AsLongId, 'TExportEDQUO, DoInitialSelectByMlkIds,  ' + AMlkIds[i].ToStr) then
+            inc(result);
+          Qry.Next;
+        end;
+      finally
+        Qry.Close;
+      end;
+    end;
+  finally
+    Qry.Free;
+  end;
+end;
+
+function TExportEDQUO.PrepareId(AConnection: TecConnection; AKundenExport: IKundenExport; AId: TLongId; AExpImpManager: TExpImpObjectManager): Boolean;
+begin
+  Result := inherited PrepareId(AConnection, AKundenExport, AId, AExpImpManager);
+  if FSelectEdNachricht = nil then
+  begin
+     FSelectEdNachricht := AConnection.CreateSQLQuery;
+     FSelectEdNachricht.SQL.Text := 'SELECT DAT_ID, QUO_ID, QUO_SENDER_ILN, QUO_EMPF_ILN FROM ' + EDQUO + ' WHERE QUO_ID = :QUO_ID';
+     FSelectEdNachricht.DBPrepare;
+  end;
+
+  FSelectEdNachricht.ParamByName('QUO_ID').AsLongId := AId;
+  try
+    FSelectEdNachricht.Open();
+    if not FSelectEdNachricht.Eof then
+    begin
+      if not FSelectEdNachricht.FieldByName('QUO_ID').IsNull and SelectIdForExport(FSelectEdNachricht.FieldByName('QUO_ID').AsLongId, 'TExportEDQUO,  ' + AId.ToStr) then
+         Result := True;
+
+      if AExpImpManager.GetItemByIdentifier(EDDAT).SelectIdForExport(FSelectEdNachricht.FieldByName('DAT_ID').AsLongId, 'TExportEDQUO,  ' + AId.ToStr) then
+         Result := True;
+
+       AKundenExport.AddToMprdList(FSelectEdNachricht.FieldByName('QUO_SENDER_ILN').AsString);
+       AKundenExport.AddToMprdList(FSelectEdNachricht.FieldByName('QUO_EMPF_ILN').AsString);
+    end;
+  finally
+    FSelectEdNachricht.Close;
+  end;
+end;
+
+function TExportEDQUO.GetNewColumnValue(ATable: TTAbleObj; AColumn: TColumnObj; AKundenImport: IKundenImport; Var ANewValue: String; AForInsert: Boolean): Boolean;
+begin
+  Result := inherited GetNewColumnValue(ATable, AColumn, AKundenImport, ANewValue, AForInsert);
+  if Result then
+    Exit;
+
+  if AColumn.Columnname = 'QUO_METERINGCODE' then
+  begin
+    if length(EntferneHochkomma(AColumn.Value)) = MeteringCodeLaenge then
+      ANewValue := AKundenImport.GetMappedMeteringCode(AColumn.Value)
+     else
+      ANewValue := AKundenImport.GetMappedMaloCode(AColumn.Value);
+    Result := Acolumn.Value <> ANewValue;
+  end
+  else if (AColumn.Columnname = 'QUO_NACHRICHTENREFERENZNR') then
+  begin
+    ANewValue := AKundenImport.GetMappedEdiRef(AColumn.Value, 14);
+    Result := Acolumn.Value <> ANewValue;
+  end
+  else if (AColumn.Columnname = 'QUO_NACHRICHTNR') then
+  begin
+    ANewValue := AKundenImport.GetMappedEdiRef(AColumn.Value, 70);
+    result := Acolumn.Value <> ANewValue;
+  end;
+end;
+
+{ TExportEDREMP }
+
+constructor TExportEDREMP.Create(AOwner: TExpImpObjectManager; ATableIdMapping: TelStringObjectMap<TTableIdMapping>);
+begin
+  inherited CreateWithoutEpvArt(AOwner, EDREMP, ATableIdMapping);
+end;
+
+function TExportEDREMP.GetNewColumnValue(ATable: TTAbleObj; AColumn: TColumnObj; AKundenImport: IKundenImport;
+  var ANewValue: String; AForInsert: Boolean): Boolean;
+var orgValue: String;
+begin
+  result := inherited GetNewColumnValue(ATable, AColumn, AKundenImport, ANewValue, AForInsert);
+  if result then
+    exit;
+
+  if (AColumn.Columnname = 'REMP_RECHNUNGS_NR') then
+  begin
+    orgValue := AColumn.Value;
+    ANewValue := AKundenImport.GetMappedRechnungsNr(AColumn.Value, 35);
+    result := Acolumn.Value <> orgValue;
+  end;
+end;
+
+{ TExportENLOKSA }
+
+constructor TExportENLOKSA.Create(AOwner: TExpImpObjectManager; ATableIdMapping: TelStringObjectMap<TTableIdMapping>);
+begin
+  inherited Create(AOwner, ENLOKSA, ATableIdMapping);
+  FSelectENLOKSO := nil;
+end;
+
+destructor TExportENLOKSA.Destroy;
+begin
+  Freeandnil(FSelectENLOKSO);
+  inherited;
+end;
+
+function TExportENLOKSA.PrepareId(AConnection: TecConnection; AKundenExport: IKundenExport; AId: TLongId;
+  AExpImpManager: TExpImpObjectManager): boolean;
+begin
+  result := inherited PrepareId(AConnection, AKundenExport, AId, AExpImpManager);
+  // Automatisch die entsprechenden LokSo-Objekte mit selektieren
+
+  if FSelectENLOKSO = nil then
+  begin
+    FSelectENLOKSO := AConnection.CreateSQLQuery;
+    FSelectENLOKSO.SQL.Text := 'SELECT lokso_id ' + CR_LF +
+                               ' FROM ' + ENLOKSA +  CR_LF +
+                               ' WHERE LOKSA_ID = :LOKSA_ID';
+    FSelectENLOKSO.DBPrepare;
+  end;
+
+  try
+    FSelectENLOKSO.ParamByName('LOKSA_ID').AsLongId := AId;
+    FSelectENLOKSO.Open;
+    while not FSelectENLOKSO.Eof do
+    begin
+      if AExpImpManager.GetItemByIdentifier(ENLOKSO).PrepareId(AConnection, AKundenExport, FSelectENLOKSO.FieldByName('LOKSO_ID').AsLongIdZero, AExpImpManager) then
+         result := True;
+      FSelectENLOKSO.Next;
+    end;
+  finally
+    FSelectENLOKSO.Close;
+  end;
+end;
+
+{ TExportENLOKB }
+
+constructor TExportENLOKB.Create(AOwner: TExpImpObjectManager; ATableIdMapping: TelStringObjectMap<TTableIdMapping>);
+begin
+  inherited Create(AOwner, ENLOKB, ATableIdMapping);
+end;
+
+function TExportENLOKB.DoInitialSelectByAbnIds(AConnection: TecConnection; AAbnIds: TelSimpleLongIdList): Integer;
+begin
+  result := DoInitialSelect(AConnection, 'SELECT LOKB_ID FROM ' + ENLOKB + ' WHERE ABN_ID = :ABN_ID', 'ABN_ID', AAbnIds);
+end;
+
+{ TExportENLOKBE }
+
+constructor TExportENLOKBE.Create(AOwner: TExpImpObjectManager; ATableIdMapping: TelStringObjectMap<TTableIdMapping>);
+begin
+  inherited Create(AOwner, ENLOKBE, ATableIdMapping);
+end;
+
+destructor TExportENLOKBE.Destroy;
+begin
+  FreeAndNil(FSelectLokSo);
+  inherited;
+end;
+
+function TExportENLOKBE.PrepareId(AConnection: TecConnection; AKundenExport: IKundenExport; AId: TLongId;
+  AExpImpManager: TExpImpObjectManager): boolean;
+
+begin
+  result := inherited PrepareId(AConnection, AKundenExport, AId, AExpImpManager);
+
+  if FSelectLokSo = nil then
+  begin
+    FSelectLokSo := AConnection.CreateSQLQuery;
+    FSelectLokSo.SQL.Text := 'SELECT LOKSO_ID, ZPT_ID_MELO, NLK_ID, MLK_ID, TRE_ID FROM ' + ENLOKBE + ' WHERE LOKBE_ID = :LOKBE_ID';
+    FSelectLokSo.DBPrepare;
+  end;
+
+  try
+    FSelectLokSo.ParamByName('LOKBE_ID').AsLongId := AId;
+    FSelectLokSo.Open();
+    if not FSelectLokSo.Eof then
+    begin
+      if SelectOther(FSelectLokSo, ENLOKSO, 'LOKSO_ID', AConnection, AKundenExport, AExpImpManager) then
+        result := true;
+      if SelectOther(FSelectLokSo, ENZPT, 'ZPT_ID_MELO', AConnection, AKundenExport, AExpImpManager) then
+        result := true;
+      if SelectOther(FSelectLokSo, ENNLK, 'NLK_ID', AConnection, AKundenExport, AExpImpManager) then
+        result := true;
+      if SelectOther(FSelectLokSo, ENMLK, 'MLK_ID', AConnection, AKundenExport, AExpImpManager) then
+        result := true;
+      if SelectOther(FSelectLokSo, ENTRE, 'TRE_ID', AConnection, AKundenExport, AExpImpManager) then
+        result := true;
+    end;
+  finally
+    FSelectLokSo.Close;
+  end;
+end;
+
+{ TExportENSDAK }
+
+constructor TExportENSDAK.Create(AOwner: TExpImpObjectManager; ATableIdMapping: TelStringObjectMap<TTableIdMapping>);
+begin
+  inherited Create(AOwner, ENSDAK, ATableIdMapping);
+end;
+
+destructor TExportENSDAK.Destroy;
+begin
+  inherited;
+end;
+
+function TExportENSDAK.DoInitialSelectByZptIds(AConnection: TecConnection; AMndId: Integer; AZptIds: TelSimpleLongIdList): Integer;
+begin
+  Result := DoInitialSelect(AConnection, 'SELECT SDAK_ID FROM ' + ENSDAK + ' WHERE ZPT_ID = :ZPT_ID', 'ZPT_ID', AZptIds)
+end;
+
+{ TExportENNWS }
+
+constructor TExportENNWS.Create(AOwner: TExpImpObjectManager; ATableIdMapping: TelStringObjectMap<TTableIdMapping>);
+begin
+  inherited Create(AOwner, ENNWS, ATableIdMapping);
+  FAutoSelectChildIds := false;
+end;
+
+destructor TExportENNWS.Destroy;
+begin
+  inherited;
+end;
+
+function TExportENNWS.GetNewColumnValue(ATable: TTAbleObj; AColumn: TColumnObj;
+  AKundenImport: IKundenImport; var ANewValue: String; AForInsert: Boolean): Boolean;
+begin
+  result := inherited GetNewColumnValue(ATable, AColumn, AKundenImport, ANewValue, AForInsert);
+  if result then
+    exit;
+  if (AColumn.Columnname = 'NWS_PAKET_ID')  then
+  begin
+    ANewValue := AKundenImport.GetMappedNwsPaketId(AColumn.Value);
+    result := Acolumn.Value <> ANewValue;
+  end;
+end;
+
+{ TExportENNWM }
+
+constructor TExportENNWM.Create(AOwner: TExpImpObjectManager; ATableIdMapping: TelStringObjectMap<TTableIdMapping>);
+begin
+  inherited Create(AOwner, ENNWM, ATableIdMapping);
+  FSelectNwsId := nil;
+  FAutoPrepareParentIds := true; // ENNWS
+end;
+
+destructor TExportENNWM.Destroy;
+begin
+  FreeAndNil(FSelectNwsId);
+  inherited;
+end;
+
+function TExportENNWM.DoInitialSelectByMlkIds(AConnection: TecConnection; AMndId: Integer;
+  AMlkIds: TelSimpleLongIdList): Integer;
+var qry: TSqlQuery;
+    i: integer;
+begin
+  result := 0;
+
+  qry := AConnection.CreateSQLQuery;
+  try
+    qry.SQL.Text :='SELECT nwm_id, nws_id FROM ' + ENNWM + ' nwm ' + CR_LF +
+                   ' WHERE MLK_ID = :MLK_ID';
+    qry.DBPrepare;
+    for i := 0 to AMlkIds.Count - 1 do
+    begin
+      qry.Params[0].AsLongId := AMlkIds[i];
+      try
+        qry.Open;
+        while not qry.Eof do
+        begin
+          if SelectIdForExport(qry.Fields[0].AsLongId, 'TExportENNWM.DoInitialSelectByMlkIds(' + IntToStr(AMndId) + '), MlkId: ' + AMlkIds[i].ToStr) then
+            inc(result);
+          qry.Next;
+        end;
+      finally
+        qry.Close;
+      end;
+    end;
+  finally
+    qry.Free;
+  end;
+end;
+
+function TExportENNWM.PrepareId(AConnection: TecConnection; AKundenExport: IKundenExport;
+  AId: TLongId; AExpImpManager: TExpImpObjectManager): boolean;
+begin
+  result := inherited PrepareId(AConnection, AKundenExport, AId, AExpImpManager);
+  if FSelectNwsId = nil then
+  begin
+     FSelectNwsId := AConnection.CreateSQLQuery;
+     FSelectNwsId.SQL.Text := 'SELECT NWS_ID FROM ' + ENNWM + ' WHERE NWM_ID = :NWM_ID';
+     FSelectNwsId.DBPrepare;
+  end;
+
+  FSelectNwsId.ParamByName('NWM_ID').AsLongId := AId;
+  try
+    FSelectNwsId.Open();
+    if not FSelectNwsId.Eof then
+    begin
+      if AExpImpManager.GetItemByIdentifier(ENNWS).SelectIdForExport(FSelectNwsId.FieldByName('NWS_ID').AsLongId, 'TExportENNWM, ' + AId.ToStr) then
+         result := true;
+    end;
+  finally
+    FSelectNwsId.Close;
+  end;
+end;
+
+end.

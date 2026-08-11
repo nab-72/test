@@ -1,0 +1,154 @@
+unit KIS.KundenExportFrm;
+
+interface
+
+uses
+  Windows, Messages, SysUtils, Variants, Classes, Graphics, Controls, Forms,
+  Dialogs, SystemCore.EditFrm, WideStrings, DB, SqlExpr, EnergyComponents.Connection,
+  EnergyComponents.ActionManager, ActnList, ControlEnabler, StdCtrls, Buttons, ExtCtrls,
+  EnergyComponents.ButtonPanel, EnergyComponents.ScrollPanel, SystemCore.ViewContext;
+
+type
+  TfrmKundenExport = class(TfrmSCEdit)
+    dlgKundenExportSave: TSaveDialog;
+    cbxRechnungsdaten: TCheckBox;
+    grpOptionen: TGroupBox;
+    cbxProdukte: TCheckBox;
+    cbxAndereMandanten: TCheckBox;
+    cbxEEx: TCheckBox;
+    cbxNachricht: TCheckBox;
+    cbxGZip: TCheckBox;
+    cbxExportXmlDebug: TCheckBox;
+    cbxUtlvAllgemein: TCheckBox;
+    cbxMSConsAllgemein: TCheckBox;
+    cbxInvoiceAllgemein: TCheckBox;
+    cbxOrdersAllgemein: TCheckBox;
+    cbxQuotesAllgemein: TCheckBox;
+    cbxRemadvAllgemein: TCheckBox;
+    procedure cbxNachrichtClick(Sender: TObject);
+  private
+    function InternDoIt(AMndId: Integer; AKndNrInitial: String; AKndInitial: Integer): Boolean;
+  public
+    class function DoIt(AViewContext: TViewContext; AMndId: Integer; AKndNrInitial: String; AKndInitial: Integer): Boolean;
+  end;
+
+
+implementation
+
+uses
+  EnergyLibrary.Constants, KIS.KundenExport, EnergyLibrary.Lists, SystemCore.ConnectionPool,
+  SystemCore.Customers, SystemCore.HierarchieManager,
+  EnergyBasics.Constants, SystemCore.Constants, SystemCore.AppConfig, JclCompression, StrUtils,
+  KIS.KundenExportImport.Utils;
+
+{$R *.dfm}
+
+{ TfrmKundenExport }
+
+procedure TfrmKundenExport.cbxNachrichtClick(Sender: TObject);
+begin
+  inherited;
+  cbxUtlvAllgemein.Enabled := cbxNachricht.Checked;
+  cbxMSConsAllgemein.Enabled := cbxNachricht.Checked;
+  cbxQuotesAllgemein.Enabled := cbxNachricht.Checked;
+  cbxInvoiceAllgemein.Enabled := cbxNachricht.Checked;
+  cbxRemadvAllgemein.Enabled := cbxNachricht.Checked;
+  cbxOrdersAllgemein.Enabled := cbxNachricht.Checked;
+end;
+
+class function TfrmKundenExport.DoIt(AViewContext: TViewContext; AMndId: Integer; AKndNrInitial: String; AKndInitial: Integer): Boolean;
+var
+  FrmKundenExport: TFrmKundenExport;
+begin
+  FrmKundenExport := TFrmKundenExport.CreateAsTabModal(AViewContext, AMndId);
+  try
+    result := FrmKundenExport.InternDoIt(AMndId, AKndNrInitial, AKndInitial);
+  finally
+    FrmKundenExport.Free;
+  end;
+end;
+
+function TfrmKundenExport.InternDoIt(AMndId: Integer; AKndNrInitial: String; AKndInitial: Integer): Boolean;
+var
+  List: TelSimpleLongIdList;
+  KndExportList: TelSimpleIntegerList;
+  stichtagVon, stichtagBis: TDateTime;
+  kundenExport: TKundenExport;
+  prdExport: Boolean;
+  exportOptionen : TExportOptionen;
+
+begin
+  cbxAndereMandanten.Checked := (MandantInfo(AMndId).MandantUnbundlingSicht <> UNBUNDLING_ALLES) or not ENConfig(AMndId).IsIntegrativerMessstellenbetriebAktiv;
+  cbxProdukte.Checked := not IsCustomerWilken;
+  cbxAndereMandanten.visible := true;
+  cbxRechnungsdaten.Visible := ConnectionPool.IsSpecialUserName;
+  cbxEEx.Visible := ConnectionPool.IsSpecialUserName;
+  cbxNachricht.Visible := ConnectionPool.IsSpecialUserName;
+  cbxGZip.Checked := not IsCustomerWilken;
+  cbxExportXmlDebug.Visible := ConnectionPool.IsSpecialUserName;
+
+  // Erst mal nur für ENAE abschaltbar
+  cbxUtlvAllgemein.Visible :=  ConnectionPool.IsEnaeUserName;
+  cbxMSConsAllgemein.Visible :=  ConnectionPool.IsEnaeUserName;
+  cbxQuotesAllgemein.Visible := ConnectionPool.IsEnaeUserName;
+  cbxInvoiceAllgemein.Visible := ConnectionPool.IsEnaeUserName;
+  cbxRemadvAllgemein.Visible := ConnectionPool.IsEnaeUserName;
+  cbxOrdersAllgemein.Visible := ConnectionPool.IsEnaeUserName;
+
+  result := ShowModal = mrOk;
+  if not result then
+    exit;
+
+  List := TelSimpleLongIdList.Create;
+  KndExportList := TelSimpleIntegerList.Create;
+  kundenExport := TKundenExport.Create;
+  exportOptionen := TExportOptionen.Create;
+  try
+    KndExportList.Add(AKndInitial);
+    prdExport := false;
+    if cbxProdukte.Checked then
+      prdExport := kundenExport.DoProduktExport(KndExportList, false);
+
+    dlgKundenExportSave.FileName := 'kunden_export_kndnr_' + AKndNrInitial + '_' + DateToStr(now) + '.xml' + IfThen(cbxGZip.Checked, '.gzip', '');
+    if (dlgKundenExportSave.Execute(Handle)) then
+    begin
+      if cbxRechnungsdaten.Checked then
+      begin
+        stichtagVon := StrToDate('01.01.1900');
+        stichtagBis := StrToDate('31.12.2999');
+      end
+      else
+      begin
+        stichtagVon := NULL_DATE;
+        stichtagBis := NULL_DATE;
+      end;
+      List.Add(TLongId.From(AKndInitial));
+      exportOptionen.DoEexExport := cbxEEx.Checked;
+      exportOptionen.DoRechnungExport := cbxRechnungsdaten.Checked;
+      exportOptionen.DoNachrichtenExport := cbxNachricht.Checked;
+      exportOptionen.StichtagVon := stichtagVon;
+      exportOptionen.StichtagBis := stichtagBis;
+      exportOptionen.DoAndereMandanten := cbxAndereMandanten.Checked;
+      exportOptionen.DoGZip := cbxGZip.Checked;
+      exportOptionen.IsExportXmlDebug := cbxExportXmlDebug.Checked;
+
+      exportOptionen.DoUtlv := cbxUtlvAllgemein.Checked and cbxNachricht.Checked;
+      exportOptionen.DoMscons := cbxMSConsAllgemein.Checked and cbxNachricht.Checked;
+      exportOptionen.DoQuo := cbxQuotesAllgemein.Checked and cbxNachricht.Checked;
+      exportOptionen.DoInvoice := cbxInvoiceAllgemein.Checked and cbxNachricht.Checked;
+      exportOptionen.DoRemadv := cbxRemadvAllgemein.Checked and cbxNachricht.Checked;
+      exportOptionen.DoOrders := cbxOrdersAllgemein.Checked and cbxNachricht.Checked;
+
+      kundenExport.ExportKundenListe(connection, ViewContext, List, AMndId, dlgKundenExportSave.FileName, prdExport, exportOptionen);
+    end;
+    finally
+    begin
+      kundenExport.Free;
+      KndExportList.Free;
+      List.Free;
+      exportOptionen.Free;
+    end;
+  end;
+end;
+
+end.

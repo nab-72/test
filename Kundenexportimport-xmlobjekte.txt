@@ -1,0 +1,313 @@
+unit KIS.KundenExportImport.XMLObjekte;
+
+interface
+
+uses
+  Lib32XMLObject, Classes, SysUtils, SystemCore.ViewContext, EnergyComponents.Connection, DB,
+  EnergyLibrary.Constants, XMLIntf, EnergyLibrary.Lists;
+
+type
+  TTableObj = Class;
+  TTablesObj = Class
+  private
+    FChilds: TelObjectList<TTableObj>;
+    FInternalStrings: TStringList;
+    function InternString(const S: string): string;
+  public
+    destructor Destroy; override;
+    constructor Create();  reintroduce;
+
+    property Childs: TelObjectList<TTableObj> read FChilds;
+    procedure SetExportMndIdFilter(const Value: Integer; ACheckMndIdCol: Boolean);
+    procedure PrintTableToConsole(ATab: Integer = 0);
+    procedure RemoveIgnoredTables(AList: TStrings);
+
+    procedure LoadFromXML(const AViewContext: TViewContext; AConnection: TecConnection; const Root: IXMLNode; AFilterByTableName: String = ''; AFilterByExportMndId: Integer = NULL_INTEGER);
+  end;
+
+  TColumnObj = class;
+  TTableObj = Class
+  private
+    FTablename: String;
+    FColumns: TelObjectList<TColumnObj>;
+    FChilds: TelObjectList<TTableObj>;
+    FExportMndId: String;
+    FIgnorieren,
+    FImportErledigt: Boolean;
+  public
+    destructor Destroy; override;
+    constructor Create(); reintroduce;
+    procedure PrintTableToConsole(ATab: Integer = 0);
+    function GetColumnByName(AColName: String; AMitException: Boolean = true): TColumnObj;
+    function GetIdentifier: String;
+
+    property Tablename: String read FTablename write FTablename;
+    property Columns: TelObjectList<TColumnObj> read FColumns;
+    property Childs: TelObjectList<TTableObj> read FChilds;
+    property ExportMndId: String read FExportMndId write FExportMndId;
+    property ImportErledigt: Boolean read FImportErledigt write FImportErledigt default false;
+    property Ignorieren: Boolean read FIgnorieren write FIgnorieren default false;
+  end;
+
+  TColumnObj = Class
+  private
+    FColumnname: String;
+    FFieldType: TFieldType;
+    FFieldSize: Integer;
+    FValue: String;
+    function GetValueBereinigt: String;
+  public
+    constructor Create(AColumnname: String; AFieldType: TFieldType; AFieldSize: Integer; AValue: String = ''); reintroduce;
+    property Columnname: String read FColumnname;
+    property Value: String read FValue write FValue;
+    property ValueBereinigt: String read GetValueBereinigt;
+    property FieldType: TFieldType read FFieldType write FFieldType;
+    property FieldSize: Integer read FFieldSize write FFieldSize;
+  end;
+
+implementation
+
+uses
+  Windows, Lib32Divers, StrUtils, KIS.KundenExportImport.Utils, Math, SystemCore.ImportExportDaten;
+
+{ TTableObj }
+
+constructor TTablesObj.Create();
+begin
+  FChilds := TelObjectList<TTableObj>.Create(false);
+  FInternalStrings := TStringList.Create;
+end;
+
+destructor TTablesObj.Destroy;
+begin
+  FreeList(FChilds);
+  FInternalStrings.Free;
+  inherited Destroy;
+end;
+
+function TTablesObj.InternString(const S: string): string;
+var
+  Index: Integer;
+begin
+  if FInternalStrings <> nil then
+  begin
+    if FInternalStrings.Find(S, Index) then
+      Result := FInternalStrings[Index]
+    else
+    begin
+      Result := S;
+      FInternalStrings.Add(S);
+    end;
+  end
+  else
+    Result := S;
+end;
+
+procedure TTablesObj.LoadFromXML(const AViewContext: TViewContext; AConnection: TecConnection;
+    const Root: IXMLNode; AFilterByTableName: String; AFilterByExportMndId: Integer);
+var colNode, tabNode: IXMLNode;
+    table: TTableObj;
+    tabName: String;
+    expMnd, idx, colIdx: Integer;
+    col: TColumnObj;
+    ttablesOld: SystemCore.ImportExportDaten.TTables;
+    ttableOld: SystemCore.ImportExportDaten.TTable;
+
+begin
+  FChilds.Clear;
+  if root.HasAttribute('ExportVersion') then
+  begin
+    // Aktuell nur eine Version
+    tabNode := root.ChildNodes.First;
+    if not tabNode.HasChildNodes then
+      exit;
+    while tabNode <> nil do
+    begin
+      tabName := InternString(tabNode.GetAttribute('Tablename'));
+      expMnd := StrToIntDef(tabNode.GetAttribute('ExportMndId'), NULL_INTEGER);
+      if ((AFilterByTableName = '') or (AFilterByTableName = TabName)) and
+         ((AFilterByExportMndId = NULL_INTEGER) or (AFilterByExportMndId = expMnd)) then
+      begin
+        table := TTableObj.Create();
+        Childs.Add(table);
+        table.Tablename := tabName;
+        table.ExportMndId := InternString(tabNode.GetAttribute('ExportMndId'));
+        if tabNode.HasChildNodes then
+        begin
+          colNode := tabNode.ChildNodes.First;
+          while colNode <> nil do
+          begin
+            col := TColumnObj.Create(InternString(colNode.GetAttribute('CName')), ftUnknown, 0, colNode.Text);
+            table.Columns.Add(col);
+            colNode := colNode.NextSibling;
+          end;
+        end;
+      end;
+      tabNode := tabNode.NextSibling;
+    end;
+  end
+   else
+  begin
+    // Fallback für ganz alte KundenImports
+    ttablesOld := SystemCore.ImportExportDaten.TTables.Create(AViewContext, AConnection);
+    try
+      ttablesOld.LoadFromXML(Root);
+      for idx := 0 to ttablesOld.Childs.Count -1 do
+      begin
+        ttableOld := ttablesOld.Childs[idx];
+        table := TTableObj.Create();
+        Childs.Add(table);
+        table.Tablename := InternString(ttableOld.Tablename);
+        table.ExportMndId := InternString(ttableOld.ExportMndId);
+        for colIdx := 0 to ttableOld.Columns.Count -1 do
+        begin
+
+          col := TColumnObj.Create(InternString(TColumn(ttableOld.Columns[ColIdx]).Columnname),
+                              ftUnknown, 0, TColumn(ttableOld.Columns[ColIdx]).Value);
+          table.Columns.Add(col);
+        end;
+      end;
+    finally
+      ttablesOld.free;
+    end;
+  end;
+end;
+
+procedure TTablesObj.PrintTableToConsole(ATab: Integer);
+var
+  I: Integer;
+  Tabs: String;
+begin
+  AllocConsole;
+  for I := 0 to ATab - 1 do begin
+    Tabs := Tabs + ' ';
+  end;
+
+  for I := 0 to FChilds.Count - 1 do begin
+    TTableObj(FChilds[I]).PrintTableToConsole(ATab + 1);
+  end;
+end;
+
+procedure TTablesObj.RemoveIgnoredTables(AList: TStrings);
+var idx: Integer;
+begin
+  if (AList = nil) or (Alist.Count = 0) then
+    exit;
+
+  for idx := FChilds.Count - 1 downto 0 do
+    if AList.IndexOf(TTableObj(FChilds[idx]).Tablename) >= 0 then
+    begin
+      TTableObj(FChilds[idx]).Free;
+      FChilds.Remove(FChilds[idx]);
+    end;
+end;
+
+procedure TTablesObj.SetExportMndIdFilter(const Value: Integer; ACheckMndIdCol: Boolean);
+var idx: Integer;
+    mndCol: TColumnObj;
+begin
+  if (value <> NULL_INTEGER) then
+    for idx := FChilds.Count - 1 downto 0 do
+    begin
+      if FChilds[idx].FExportMndId = '' then
+        continue;
+
+      if (IntToStr(Value) <> TTableObj(FChilds[idx]).FExportMndId) then
+      begin
+        FChilds[idx].Free;
+        FChilds.Remove(FChilds[idx]);
+        continue;
+      end;
+
+      if ACheckMndIdCol then
+      begin
+        mndCol := FChilds[idx].GetColumnByName('MND_ID', false);
+        if (mndCol <> nil) and (mndCol.GetValueBereinigt <> IntToStr(Value)) then
+        begin
+          FChilds[idx].Free;
+          FChilds.Remove(FChilds[idx]);
+          continue;
+        end;
+      end;
+    end;
+end;
+
+constructor TTableObj.Create();
+begin
+  FColumns := TelObjectList<TColumnObj>.Create(false);
+  FChilds := TelObjectList<TTableObj>.Create(false);
+  FImportErledigt := false;
+end;
+
+destructor TTableObj.Destroy;
+begin
+  FreeList(FColumns);
+  FreeList(FChilds);
+  inherited Destroy;
+end;
+
+function TTableObj.GetColumnByName(AColName: String; AMitException: Boolean): TColumnObj;
+var i: integer;
+begin
+  result := nil;
+  for i := 0 to FColumns.Count-1 do
+    if FColumns[i].Columnname = AColName then
+    begin
+      result := FColumns[i];
+      exit;
+    end;
+  if AMitException then
+    raise Exception.Create('Keine Spalte ' + AColName + ' in Tabellenobjekt zu ' + Tablename + ' vorhanden');
+end;
+
+function TTableObj.GetIdentifier: String;
+var i: integer;
+begin
+  result := Tablename + ', ExportMnd ' + ExportMndId + ': ';
+  for I := 0 to min(Columns.Count - 1, 5) do
+    result := Result + ifThen(i>0, ' / ', '') + Columns[i].FColumnname + ' = ' + Columns[i].ValueBereinigt;
+end;
+
+procedure TTableObj.PrintTableToConsole(ATab: Integer);
+var
+  I: Integer;
+  Tabs: String;
+begin
+  AllocConsole;
+  for I := 0 to ATab - 1 do begin
+    Tabs := Tabs + ' ';
+  end;
+
+  writeln(tabs + 'Table: ' + FTablename);
+  for I := 0 to FColumns.Count - 1 do begin
+    writeln(tabs + ' C: ' + TColumnObj(FColumns[I]).FColumnname);
+  end;
+  for I := 0 to FChilds.Count - 1 do begin
+    TTableObj(FChilds[I]).PrintTableToConsole(ATab + 1);
+  end;
+end;
+
+{ TColumnObj }
+
+constructor TColumnObj.Create(AColumnname: String; AFieldType: TFieldType; AFieldSize: Integer; AValue: String);
+begin
+  FColumnname := AColumnname;
+  FFieldType := AFieldType;
+  FFieldSize := AFieldSize;
+  FValue := AValue;
+end;
+
+function EntferneHochkomma(value: String): String;
+begin
+  Result := value;
+  if (pos('''', value) = 1) then
+    Result := copy(value, 2, Length(value) - 2);
+end;
+
+
+function TColumnObj.GetValueBereinigt: String;
+begin
+  result := TXmlUtils.ReplaceXml2Backend(value);
+end;
+
+end.

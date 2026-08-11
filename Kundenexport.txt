@@ -1,0 +1,4270 @@
+unit KIS.KundenExport;
+
+// Todo: Aufräumen: Die ENNBT, ENLPR... sind mittlerweile in den Stammdaten-Exports (TStammdatenExportImportManager)
+//    und müssen hier eigentlich nicht mehr separat zusammengesucht und exportiert werden
+// ENAGSP: Wird aktuell nicht exportiert bzw. nicht importiert!
+// AAL, AEK, SMH aufnehmen? - alsc
+
+
+interface
+
+uses
+  SysUtils, Variants, Classes,
+  WideStrings, SqlExpr, EnergyComponents.Connection,
+  SystemCore.ParamTypes, DB,
+  EnergyLibrary.Lists, Generics.Collections, Lib32SystemZeitDtm, EnergyLibrary.Constants,
+  SystemCore.TableAliase, EnergyLibrary.StringUtils,
+  XMLIntf, SystemCore.ConnectionPool, EnergyLibrary.XMLDoc,
+  StrUtils, Lib32DBMetaData, SystemCore.ViewContext, Lib32Divers, EnergyLibrary.DBUtils,
+  EnergyFrames.MessageDialogFrm, SystemCore.ThreadedProgress, SystemCore.Customers,
+  EnergyBasics.ExportFrm, Contnrs, KIS.KundenExportImport.Utils, KIS.KundenExportImport.Objects,
+  KIS.KundenExportImport.XMLObjekte;
+
+const
+  ART_EXP_CHECK = 'ART_EXP_CHECK';
+  GART_EXP_CHECK = 'GART_EXP_CHECK';
+
+type
+  // Haupt-Objekte, von denen aus selektiert wird:
+  // Diese werden initial selektiert!
+  TExportMndMasterIds=Class
+  private
+    FCntAbnIds,
+    FCntMesIds,
+    FCntEanlIds,
+    FCntKndIds,
+    FCntTreIds,
+    FCntMlkIds,
+    FCntLokbIds,
+    FCntZptIds: Integer;
+
+    FAbnIdsSelektiertDebugMap,
+    FMesIdsSelektiertDebugMap,
+    FEanlIdsSelektiertDebugMap,
+    FKndIdsSelektiertDebugMap,
+    FTreIdsSelektiertDebugMap,
+    FMlkIdsSelektiertDebugMap,
+    FLokbIdsSelektiertDebugMap,
+    FZptIdsSelektiertDebugMap: TelLongIdStringMap;
+
+    FAbnIds,
+    FMesIds,
+    FEanlIds,
+    FKndIds,
+    FTreIds,
+    FMlkIds,
+    FLokbIds,
+    FZptIds: TelSimpleLongIdList;
+
+    function AddId(AId: TLongId; AList:TelSimpleLongIdList; ASelektiertDebugMap: TelLongIdStringMap; ASource: String): Boolean;
+  public
+    MndId: Integer;
+
+    function GetDebugInfos: String;
+    function HasNewAbnIdsSinceLastReset: Boolean;
+    function HasNewMesIdsSinceLastReset: Boolean;
+    function HasNewEanlIdsSinceLastReset: Boolean;
+    function HasNewKndIdsSinceLastReset: Boolean;
+    function HasNewTreIdsSinceLastReset: Boolean;
+    function HasNewMlkIdsSinceLastReset: Boolean;
+    function HasNewLokbIdsSinceLastReset: Boolean;
+    function HasNewZptIdsSinceLastReset: Boolean;
+
+    property LastAbnIdsCount: Integer read FCntAbnIds;
+    property LastMesIdsCount: Integer read FCntMesIds;
+    property LastEanlIdsCount: Integer read FCntEanlIds;
+    property LastKndIdsCount: Integer read FCntKndIds;
+    property LastTreIdsCount: Integer read FCntTreIds;
+    property LastMlkIdsCount: Integer read FCntMlkIds;
+    property LastLokbIdsCount: Integer read FCntLokbIds;
+    property LastZptIdsCount: Integer read FCntZptIds;
+
+    property AbnIds: TelSimpleLongIdList read FAbnIds;
+    property MesIds: TelSimpleLongIdList read FMesIds;
+    property EanlIds: TelSimpleLongIdList read FEanlIds;
+    property KndIds: TelSimpleLongIdList read FKndIds;
+    property TreIds: TelSimpleLongIdList read FTreIds;
+    property MlkIds: TelSimpleLongIdList read FMlkIds;
+    property LokbIds: TelSimpleLongIdList read FLokbIds;
+    property ZptIds: TelSimpleLongIdList read FZptIds;
+
+    constructor Create(AMndId: Integer); reintroduce;
+    destructor Destroy; override;
+    procedure ResetCounter;
+
+    function AddTreId(AId: TLongId; ASource: String): Boolean;
+    function AddMesId(AId: TLongId; ASource: String): Boolean;
+    function AddKndId(AId: TLongId; ASource: String): Boolean;
+    function AddZptId(AId: TLongId; ASource: String): Boolean;
+    function AddMlkId(AId: TLongId; ASource: String): Boolean;
+    function AddAbnId(AId: TLongId; ASource: String): Boolean;
+    function AddEanlId(AId: TLongId; ASource: String): Boolean;
+    function AddLokbId(AId: TLongId; ASource: String): Boolean;
+  End;
+
+  TKundenExport = class(TInterfacedPersistent, IKundenExport)
+  private
+    FExportObjectManager: TExpImpObjectManager;
+    FExportMndId,
+    fMndId: Integer;
+    FFileName: String;
+    FEanlIdsExportiert: TelSimpleLongIdList;
+
+    FZptIdsExportiert: TelSimpleLongIdList;
+    FMndMasterIds: TelIntegerObjectMap<TExportMndMasterIds>;
+
+    FKndIdsExportiert: TelSimpleLongIdList;
+    FEanbIds: TelSimpleLongIdList;
+    FEanbIdsExportiert: TelSimpleLongIdList;
+    FLifIds: TelSimpleLongIdList;
+    FMvaIds: TelSimpleLongIdList;
+
+    FRgzIds: TelSimpleLongIdList;
+    FBigIds: TelSimpleLongIdList;
+    FLprIds: TelSimpleLongIdList;
+    FNetIds: TelSimpleLongIdList;
+    FNBTIds: TelSimpleLongIdList;
+    FMbtIds: TelSimpleLongIdList;
+    FBikIds: TelSimpleLongIdList;
+    FZrtIds: TelSimpleLongIdList;
+    FZpgIds: TelSimpleLongIdList;
+    FZpgIdsExportiert: TelSimpleLongIdList;
+    FGerpIds: TelSimpleLongIdList;
+    FGtwIds: TelSimpleLongIdList;
+    FGtwIdsExportiert: TelSimpleLongIdList;
+    FGtaIds: TelSimpleLongIdList;
+
+    fEAGIds: TelSimpleLongIdList;
+    fEAGTIds: TelSimpleLongIdList;
+
+    fZaeIds: TelSimpleLongIdList;
+    fZaeIdsExportiert: TelSimpleLongIdList;
+    fEAPWIds: TelSimpleLongIdList;
+    fZPTHIds: TelSimpleLongIdList;
+    FGbzIds: TelSimpleLongIdList;
+    fZpbIds: TelSimpleLongIdList;
+    fZpbdIds: TelSimpleLongIdList;
+    FMedIds: TelSimpleLongIdList;
+    FZpttrIds: TelSimpleLongIdList;
+    FZpttreanlIds: TelSimpleLongIdList;
+    fLschIds: TelSimpleLongIdList;
+    fLschPrzIdStornos: TelSimpleLongIdList;
+    FLsmwIds: TelSimpleLongIdList;
+    FLsmhIds: TelSimpleLongIdList;
+    fVbaNummern: TelSimpleLongIdList;
+    fVerIds: TelSimpleLongIdList;
+    fVetNummern: TelSimpleLongIdList;
+    FAvmpIds: TelSimpleLongIdList;
+    FBereitsExportiertePrzIds: TelSimpleLongIdList;
+    FZpkIds: TelSimpleLongIdList;
+
+    FAbnIdsExportiert: TelSimpleLongIdList;
+    FZpkIdsExportiert: TelSimpleLongIdList;
+    FGerpIdsExportiert: TelSimpleLongIdList;
+    fFldNamen: TStringList;
+    fObsBezeichnungenMeLo: TStringList;
+    fObsBezeichnungenMaLo: TStringList;
+    fMeteringcodes: TStringList;
+    fGpvgIds: TelSimpleLongIdList;
+    FHzoNrList: TStringList;
+    FAstpIds: TelSimpleLongIdList;
+    FAaufIds: TelSimpleLongIdList;
+    FAafeIds: TelSimpleLongIdList;
+    FAauiIds: TelSimpleLongIdList;
+    FAausIds: TelSimpleLongIdList;
+    FAaubIds: TelSimpleLongIdList;
+    FAkaIds: TelSimpleLongIdList;
+    FAkaIdsExportiert: TelSimpleLongIdList;
+    FAprPrzIds: TelSimpleLongIdList;
+    FAprPrzIdsExportiert: TelSimpleLongIdList;
+    FRemPrzIdsUmbuchung: TelSimpleLongIdList;
+    FAbmIds: TelSimpleLongIdList;
+    FAbkIds: TelSimpleLongIdList;
+    FAbzIds: TelSimpleLongIdList;
+    FAbwIds: TelSimpleLongIdList;
+    FAauwIds: TelSimpleLongIdList;
+    FAzzuIds: TelSimpleLongIdList;
+    FZsteIds: TelSimpleLongIdList;
+    FZsefIds: TelSimpleLongIdList;
+    FZseiIds: TelSimpleLongIdList;
+    FZmweIds: TelSimpleLongIdList;
+    FZmweIdsExportiert: TelSimpleLongIdList;
+    FZmwzIds: TelSimpleLongIdList;
+    FZstepIds: TelSimpleLongIdList;
+    FAmmrIds: TelSimpleLongIdList;
+    FMwmemaIds: TelSimpleLongIdList;
+    FZpoeIds: TelSimpleLongIdList;
+    FZptemIds: TelSimpleLongIdList;
+    FMnnIds: TelSimpleLongIdList;
+    FMnaIds: TelSimpleLongIdList;
+    FArtIds: TelSimpleLongIdList;
+    FGartIds: TelSimpleLongIdList;
+
+    // IDs für Export bei Tabellennamen mappen
+    TableIdMapping: TelStringObjectMap<TelSimpleLongIdList>;
+
+    FNbtNrAusKnvList: TStringList;
+    FMpidNrList: TStringList;
+
+    fSelectENEANL: String;
+    fSelectZPT_ENEANL: String;
+    fSelectZPT_ENEZPA: String;
+    fSelectZPT_ENEAVS: String;
+    fSelectZPT_ENZPTH: String;
+    fSelectENEAPW: String;
+    fSelectENEZPA: String;
+    fSelectENEZPAV: String;
+    fSelectENEAV: String;
+    fSelectENEAVS: String;
+    fSelectENZPTH: String;
+    fSelectENEANB: String;
+    fSelectENZPT: String;
+    fSelectENEAD: String;
+    fSelectENEAB: String;
+    fSelectENEABT: String;
+    fSelectENEABP: String;
+    fSelectENEAG: String;
+    fSelectENEAGT: String;
+    fSelectAnlagenMitGemeinsamerMessung: String;
+    fSelectAnlagenAusAnlagengruppe: String;
+    fSelectAnlagenAusSpeicherZuordnung: String;
+    fSelectSpeicherAusSpeicherZuordnung: String;
+    fSelectENKND: String;
+    fSelectENEASE: String;
+    fSelectENZPD: String;
+    fSelectENERV: String;
+    fSelectENERVZPEanl: String;
+    fSelectENERVZPZpt: String;
+    fSelectENERVA: String;
+    fSelectENTRE: String;
+    fSelectENEAZU: String;
+    fSelectENEAZUD: String;
+    fSelectENEAEAM: String;
+    fSelectENEPEXRI: String;
+    fSelectENEAPO: String;
+    fSelectENERG: String;
+    fSelectENEARG: String;
+    fSelectENEASSB: String;
+    fSelectENEAAW: String;
+    fSelectENEAEB: String;
+    fSelectENEAES: String;
+    fSelectENEAET: String;
+    fSelectENEATE: String;
+
+    //Messprodukte und deren Verwendungszwecke
+    FSelectENZPMPR,
+    FSelectENZPMVR,
+    FSelectENZPMV: String;
+
+    //Redispatch
+    fSelectENEASEE: String;
+    fSelectENEASEEOBS: String;
+
+    //Vergütungsende
+    fSelectENEANLVE: String;
+    fSelectENEANLVEKWK: String;
+    fSelectENVEEPEX: String;
+
+    //Prozess
+    fSelectENPRZ : String;
+    fSelectENRPR : String;
+    fSelectENFDEF: String;
+    fSelectENFSU : String;
+    fSelectENFVB : String;
+    fSelectENKNV : String;
+    fSelectENMLR : String;
+    fSelectENSPZ : String;
+    fSelectENVFI : String;
+    fSelectENVKZ : String;
+    fSelectENVFM : String;
+    fSelectENVFS : String;
+    fSelectENVFA : String;
+    fSelectENVFAI: String;
+    fSelectENVFME: String;
+    fSelectENKNVA: String;
+    fSelectENVFAA: String;
+
+    fSelectENGBT : String;
+    fSelectENENVP : String;
+    fSelectENEANV : String;
+    fSelectENABS: String;
+    fSelectENABT: String;
+    fSelectENEANLSP: String;
+    fSelectENEANI: String;
+    fSelectENEAVD: String;
+    fSelectENERVZT: String;
+    fSelectENTMV: String;
+
+    fSelectENABN: String;
+    fSelectENGERP: String;
+    fSelectENGERP_ABN: String;
+    fSelectENMVA: String;
+
+    fSelectENZPO: String;
+    fSelectENZPOE: String;
+    FSelectENZPOVR,
+    FSelectENZPOV: String;
+
+    fSelectENSMA: String;
+
+    fSelectENZPZ: String;
+    fSelectENZPS: String;
+    fSelectENZPB: String;
+    fSelectENZPBD: String;
+    fSelectENZPN: String;
+    fSelectENMLK: String;
+    fSelectENZMLK: String;
+    fSelectENMED: String;
+    fSelectENZMB: String;
+    fSelectENZLF: String;
+    fSelectENPRZRA: String;
+    fSelectENZPG: String;
+    fSelectENZPG_ZPG: String;
+    fSelectENZPGD: String;
+    fSelectENGBZSlave: String;
+    fSelectENGBZMaster: String;
+    fSelectENGBZD: String;
+    fSelectENGER_Master: String;
+    fSelectENGER_Slave: String;
+    fSelectENAVMP: String;
+    fSelectENMES: String;
+    fSelectENZAE: String;
+    fSelectENZZK: String;
+    fSelectZPT_ENZPTH_DEBITOR: String;
+    fSelectENZPTH_DEBITOR: String;
+    fSelectENMESUeberKndId: String;
+    fSelectCRGPVG: String;
+    fSelectCRGPVL: String;
+    fSelectCRGPVR: String;
+    fSelectCRGPVTU: String;
+    fSelectENABNGMD: String;
+    fSelectENZPTTR: String;
+    fSelectENZPTTREANL: String;
+    fSelectENLSCH: String;
+    fSelectENLSMW: String;
+    fSelectENLSMH: String;
+    fSelectENVBA: String;
+    fSelectENVER: String;
+    fSelectENKVE: String;
+    fSelectENKVP: String;
+    fSelectENVET: String;
+    fSelectENFLD: String;
+    fSelectENOBSMeLo: String;
+    fSelectENOBSMaLo: String;
+
+    fSelectENZPK: String;
+    fSelectENHZO: String;
+    fSelectENZTH: String;
+    fSelectENEANLBV: String;
+    fSelectENEAVSV: String;
+    fSelectENASTZ: String;
+    fSelectENASTP: String;
+    fSelectENMPID: String;
+    fSelectENPAV: String;
+    fSelectENAAUF: String;
+    fSelectENAAFE: String;
+    fSelectENAAUI: String;
+    fSelectENAAUS: String;
+    fSelectENAAUB: String;
+    fSelectENAKA: String;
+    fSelectENAPR: String;
+    fSelectENABM: String;
+    fSelectENABK: String;
+    fSelectENABZ: String;
+    fSelectENABW: String;
+    fSelectENAAUW: String;
+    fSelectENAZZU: String;
+    fSelectENZSTE: String;
+    fSelectENZSEF: String;
+    fSelectENZSEI: String;
+    fSelectENZMWE: String;
+    fSelectENZMWZ: String;
+    fSelectENZSTEP: String;
+    fSelectENAMMR: String;
+    fSelectENMWMEMA: String;
+    fSelectENZPTEM: String;
+    fSelectENZPTMA: String;
+    fSelectCRABRPG: String;
+    fSelectCRRABG: String;
+    fSelectENMNN: String;
+    fSelectENMNA: String;
+    fSelectENART: String;
+    fSelectENGART: String;
+
+     //Marktgebiete
+    fSelectENZPM: String;
+
+    fSelectENZMK: String;
+
+    //Geräte
+    fSelectENZAP: String;
+    fSelectENZPGS: String;
+    fSelectENGTW_ALT: String;
+    fSelectENGTW_NEU: String;
+    fSelectENTGW: String;
+    fSelectENTGWS: String;
+    fSelectENGTA: String;
+
+    fSelectENKAKZ: String;
+    fSelectENMVAV: String;
+    fSelectENMPMLK: String;
+    fSelectENZPL: String;
+    fSelectENZPTB: String;
+    fSelectENZPTI: String;
+    fSelectENZPH: String;
+    fSelectENZPHV: String;
+    fSelectENATN: String;
+    fSelectENATZ: String;
+    fSelectCRGPVT: String;
+    fSelectENVBE: String;
+    fSelectENVBE_SMTP: String;
+    fSelectENABSR: String;
+    fSelectENABSZ: String;
+    fSelectENVZR: String;
+    fSelectENVZZ: String;
+    fSelectENESA: String;
+    fSelectENESAM: String;
+    fSelectENEGA: String;
+    fSelectENEGAM: String;
+    fSelectENEWA: String;
+    fSelectENEWAM: String;
+    fSelectENPRDU: String;
+    fSelectENPRDM: String;
+    fSelectENPRDT: String;
+    fSelectENTUA: String;
+//    fSelectCRRAB: String;
+    fSelectENKFG: String;
+
+    qryAnlagenGemeinsameMessung: TSQLQuery;
+    qryAnlagenAusGruppe: TSQLQuery;
+    qryAnlagenAusSpeicherZuordnung: TSQLQuery;
+    qrySpeicherAusSpeicherZuordnung: TSQLQuery;
+    qryUltimate: TSQLQuery;
+
+    FStatusTextBase,
+    fENZPTTR: String;
+    fENZPTTREANL: String;
+
+    fViewContext: TViewContext;
+
+    fEEG2017ZuschlagTabellenVorhanden: Boolean;
+    fEinsmanTabellenVorhanden: Boolean;
+    fEPEXTabellenVorhanden: Boolean;
+
+    fConnection: TecConnection;
+    fXmlStream: TStream;
+    fNewLine: Boolean;
+
+    FExportOptionen: TExportOptionen;
+
+    FWartenThread: TThreadedProgress;
+    FGpAdrInfoManager: TGpAdrInfoExportManager;
+    FSdManager: TStammdatenExportImportManager;
+    FEckdaten: TExportEckdaten;
+    FExportLog: TStringList;
+
+    FEexSelectErledigt: TStringList;
+    FQrySelectEpzl,
+    FQrySelectEel: TSQLQuery;
+
+    procedure InitSelects(AMndId: Integer);
+    procedure FillTable(ATable: TTableObj; AQry: TSQLQuery);
+
+    function CheckObSchonExportiert(ATableName: String; Qry: TSQLQuery; AMndKndIdListe: TelSimpleLongIdList): Boolean;
+    function AddIdToList(AListe: TelSimpleLongIdList; AId: TLongId): Boolean;
+    function AddStringToList(AListe: TStringList; AValue: String): Boolean;
+    function FillChildrenWithPreparedQuery(Qry: TSQLQuery; ATableName: String; aIdValueList: TDictionary<String, TLongId>; AMndKndIdListe: TelSimpleLongIdList): Integer;
+    function FillChildrenWithPreparedQueryWithString(Qry: TSQLQuery; ATableName: String; aKeyValueList: TDictionary<String, String>; AMndKndIdListe: TelSimpleLongIdList): Integer;
+
+    procedure AddEexIdsByFkLinkId(AFkId: TLongId; AFkTyp: Integer);
+
+    procedure CheckModule;
+    procedure DoProzessTabellen(AMndKndIdListe: TelSimpleLongIdList; ANurLieferscheinProzesse: Boolean);
+    procedure Init(AMndId: Integer);
+    procedure DoExport(ADoGZip: Boolean);
+    procedure WriteXmlStr(xmlStr: String);
+    procedure WriteChildTable(table: TTableObj);
+    procedure ClearIds;
+
+    function ExportTabelle(AMndKndIdListe: TelSimpleLongIdList; select: String; tablename: String; idFeldname1: String;
+      idListe1: TelSimpleLongIdList; idFeldname2: String = ''; idListe2: TelSimpleLongIdList = nil): Integer; overload;
+    function ExportTabelleWithString(AMndKndIdListe: TelSimpleLongIdList; select: String; tablename: String; feldname1: String;
+      liste1: TStringList; feldname2: String = ''; liste2: TStringList = nil): Integer;
+    procedure ExportTabelle(AExportObj: TExpImpTableObj); overload;
+
+    procedure FuelleKndIdListe(AMndKndIdListe: TelSimpleLongIdList);
+    procedure SetStatus(AStatusText: String; ASetBaseStatusText: Boolean = true);
+    procedure SetAddonStatus(AStatusText: String);
+    procedure DoExportDaten(AMndMasterIds: TExportMndMasterIds);
+    function GetSelectENMPID(ASelect: String): String;
+    procedure CheckNbtIdZuNbtNr(AMndIdStr, ANbtNrStr: String);
+    procedure LoadZstepListe(AQry: TSQLQuery; ATable: TTableObj);
+    procedure AddToExportLog(AMsg: String);
+    procedure CheckAndLogKndIdExport(AKndId: TLongId; AGrundFuerHinzufuegen: String; AMndKndIdListe: TelSimpleLongIdList);
+    procedure RegisterTableIdList(ATableName: String);
+    function AddIdToIdMapping(ATableName: String; AField: TField): Boolean;
+
+  public
+    function ExportKundenListe(AConnection: TecConnection; AViewContext: TViewContext; AKndIds: TelSimpleLongIdList; AMndId: Integer;
+                      AFileName: String; AProdukteExportiert: Boolean; AExportOptionen: TExportOptionen): boolean;
+    destructor Destroy; override;
+    constructor Create;
+    function DoProduktExport(AMndKndIdListe: TelSimpleIntegerList; AMitFrage: Boolean): boolean;
+
+    procedure AddToMprdList(AMpidNummer: String);
+    Procedure CheckIsCanceled;
+  end;
+
+
+
+implementation
+
+uses
+  EnergyBasics.Constants, Controls, Kundenabrechnung.ProduktImpExp, EnergyBasics.Version,
+  SystemCore.HierarchieManager, GPObjectModel, JclCompression, SystemCore.CommonFunctions,
+  EnergyLibrary.Types, SystemCore.DBFunctions, EnergyBasics.EnsuredExec.Constants, Math;
+
+
+
+function AnonymisiereDaten(AColumn: TcolumnObj; ATyp:TAnonymisierungsDatenTyp): string;
+begin
+  result := AColumn.Value;
+  case ATyp of
+    pdName:                 result := QuotedStr('ImpName');
+    pdVorname:              result := QuotedStr('ImpVorname');
+    pdStrasse:              result := QuotedStr('Importweg');
+    pdHausnr:               result := QuotedStr('3');
+    pdHausUnterNr:          result := QuotedStr('a');
+    pdOrt:                  result := QuotedStr('ImpOrt');
+    pdPlz:                  result := QuotedStr('99990');
+    pdSenderName:           result := QuotedStr('ImpSenderName');
+    pdSenderOrt:            result := QuotedStr('ImpSenderOrt');
+    pdSenderStrasse:        result := QuotedStr('ImportSenderweg');
+    pdSenderHausNr:         result := QuotedStr('35');
+    pdSenderPlz:            result := QuotedStr('99909');
+    pdEmpfaengerName:       result := QuotedStr('ImpEmpfaengerName');
+    pdEmpfaengerOrt:        result := QuotedStr('ImpEmpfaengerOrt');
+    pdEmpfaengerStrasse:    result := QuotedStr('ImportEmpfaengerweg');
+    pdEmpfaengerHausNr:     result := QuotedStr('35');
+    pdEmpfaengerPlz:        result := QuotedStr('99909');
+    pdAnsprechpartner:      result := QuotedStr('ImpAsp');
+    pdAnsprechpartnerEmail: result := QuotedStr('ImpAspEmail');
+    pdTelNr:                result := QuotedStr('0123456789');
+    pdMail:                 result := QuotedStr('Email@Import.de');
+  end;
+end;
+
+function TKundenExport.ExportKundenListe(AConnection: TecConnection; AViewContext: TViewContext; AKndIds: TelSimpleLongIdList; AMndId: Integer;
+                      AFileName: String; AProdukteExportiert: Boolean; AExportOptionen: TExportOptionen): boolean;
+begin
+  Result := False;
+  FExportOptionen := AExportOptionen;
+  FWartenThread := TThreadedProgress.Create('Exportiere Kunden', true, 0);
+  FEckdaten := TExportEckdaten.Create(AMndId, true);
+  FGpAdrInfoManager := TGpAdrInfoExportManager.Create(AConnection, AViewContext);
+  try
+    fConnection := aConnection;
+    FSdManager := TStammdatenExportImportManager.Create(fConnection, nil); // beim Export werden ATables nicht benötig
+    FEckdaten.ExportMndId := AMndId;
+    if AProdukteExportiert then
+      FEckdaten.ExportMitPrd := 1
+    else
+      FEckdaten.ExportMitPrd := 0;
+    fFileName := aFileName;
+    Init(AMndId);
+
+    if AKndIds.Count > 0 then
+    begin
+      ClearIds;
+      FSdManager.Clear;
+      FuelleKndIdListe(AKndIds);
+      DoExport(FExportOptionen.DoGZip);
+    end;
+  finally
+    FreeAndNil(FWartenThread);
+    FreeAndNil(FSdManager);
+    FreeAndNil(FEckdaten);
+    FreeAndNil(FGpAdrInfoManager);
+  end;
+end;
+
+procedure TKundenExport.DoExport(ADoGZip: Boolean);
+var
+  idx: Integer;
+  mndId: Integer;
+  MndMasterIds: TExportMndMasterIds;
+  fStream: TFileStream;
+  dbgInfo: String;
+begin
+  CheckModule;
+  fNewLine := False;
+  if ADoGZip then
+  begin
+    fStream := TFileStream.Create(FFileName, fmCreate or fmShareDenyWrite);
+    fXmlStream := TJclGZIPCompressionStream.Create(fStream);
+  end
+   else
+  begin
+    fStream := nil;
+    fXmlStream := TFileStream.Create(FFileName, fmCreate or fmShareDenyWrite);
+  end;
+  try
+    WriteXmlStr('<?xml version="1.0" encoding="windows-1252"?>');
+    fNewLine := True;
+    WriteXmlStr('<ROOT xmlns="NS" >');
+    WriteXmlStr('<' + XML_TAG_TABLES + ' ExportVersion="1.1">');
+    for mndId in FMndMasterIds.KeyCollection do
+    begin
+      MndMasterIds := FMndMasterIds.Values[mndId];
+      DoExportDaten(MndMasterIds);
+    end;
+    WriteXmlStr('</' + XML_TAG_TABLES + '>');
+
+    FEckdaten.WriteExportData(fXmlStream);
+    FSdManager.WriteExportData(fXmlStream);
+    FGpAdrInfoManager.WriteExportData(fXmlStream);
+
+    if FExportLog.Count > 0 then
+    begin
+      dbgInfo := '';
+      for idx := 0 to FExportLog.Count - 1 do
+        dbgInfo := dbgInfo +  FExportLog[idx] + CR_LF;
+       TXmlUtils.WriteXmlStr(fXmlStream, '<!-- ExportLog:' + CR_LF + dbgInfo + '-->', true);
+    end;
+
+    if FExportOptionen.IsExportXmlDebug then
+    begin
+      dbgInfo := '';
+      for mndId in FMndMasterIds.KeyCollection do
+      begin
+        if dbgInfo <> '' then
+          dbgInfo := dbgInfo + CR_LF + CR_LF;
+        dbgInfo := dbgInfo + FMndMasterIds.Values[mndId].GetDebugInfos;
+      end;
+      TXmlUtils.WriteXmlStr(fXmlStream, '<!-- DebugInfo Initial-SelectedIds:' + CR_LF + dbgInfo + '-->', true);
+    end;
+
+    FExportOptionen.WriteToXml(fXmlStream);
+    WriteXmlStr('</ROOT>');
+  finally
+    FreeAndNil(fXmlStream);
+    FreeAndNil(fStream);
+  end;
+  showInfoDialog('Der Kunde wurde erfolgreich nach ' + FFileName + ' exportiert');
+end;
+
+procedure TKundenExport.WriteXmlStr(xmlStr: String);
+begin
+  TXmlUtils.WriteXmlStr(fXmlStream, xmlStr, fNewLine);
+end;
+
+procedure TKundenExport.WriteChildTable(table: TTableObj);
+var
+  i: Integer;
+  column: TcolumnObj;
+  addOn: String;
+  expObj: TExpImpTableObj;
+  id: TLongId;
+begin
+  WriteXmlStr(' <Table Tablename="' + table.Tablename + '" ExportMndId=' + table.ExportMndId + addon + '>');
+  addOn := '';
+  if FExportOptionen.IsExportXmlDebug then
+  begin
+    expObj := FExportObjectManager.GetItemByIdentifier(table.Tablename);
+    if (expObj <> nil) then
+    begin
+      column := table.GetColumnByName(expObj.IdFieldName);
+      if (column <> nil) then
+      begin
+        id := TLongId.FromStr(column.Value);
+        addon := expObj.IdDebugInfo[id];
+        TXmlUtils.WriteXmlStr(fXmlStream, '<!-- DebugInfo:' + CR_LF + addOn + '-->', true);
+      end;
+    end;
+  end;
+  for i := 0 to table.Columns.Count - 1 do
+  begin
+    column := table.Columns[i];
+    WriteXmlStr('    <Column CName="' + column.Columnname + '">' + column.Value + '</Column>');
+  end;
+  WriteXmlStr(' </Table>');
+end;
+
+procedure TKundenExport.Init(AMndId: Integer);
+begin
+  fMndId := AMndId;
+  fViewContext := TViewContext.EmptyContext;
+
+
+  FGerpIds := TelSimpleLongIdList.Create;
+  FZptIdsExportiert := TelSimpleLongIdList.Create;
+  FKndIdsExportiert := TelSimpleLongIdList.Create;
+  FEanbIds := TelSimpleLongIdList.Create;
+  FEanbIdsExportiert := TelSimpleLongIdList.Create;
+  FLifIds  := TelSimpleLongIdList.Create;
+  FMvaIds  := TelSimpleLongIdList.Create;
+
+  FEanlIdsExportiert := TelSimpleLongIdList.Create;
+
+  FRgzIds := TelSimpleLongIdList.Create;
+  FBigIds := TelSimpleLongIdList.Create;
+  FNetIds := TelSimpleLongIdList.Create;
+  FLprIds := TelSimpleLongIdList.Create;
+
+  FNbtIds := TelSimpleLongIdList.Create;
+  FMbtIds := TelSimpleLongIdList.Create;
+  fEAGIds := TelSimpleLongIdList.Create;
+  fEAGTIds := TelSimpleLongIdList.Create;
+  fBikIds := TelSimpleLongIdList.Create;
+  FZrtIds := TelSimpleLongIdList.Create;
+  FAvmpIds := TelSimpleLongIdList.Create;
+  FBereitsExportiertePrzIds := TelSimpleLongIdList.Create;
+  FZpgIds := TelSimpleLongIdList.Create;
+  FZpgIdsExportiert := TelSimpleLongIdList.Create;
+  FGtaIds := TelSimpleLongIdList.Create;
+  FGtwIds := TelSimpleLongIdList.Create;
+  FGtwIdsExportiert := TelSimpleLongIdList.Create;
+  fZaeIds := TelSimpleLongIdList.Create;
+  fZaeIdsExportiert := TelSimpleLongIdList.Create;
+  fEAPWIds := TelSimpleLongIdList.Create;
+  fZPTHIds := TelSimpleLongIdList.Create;
+  fGBZIds := TelSimpleLongIdList.Create;
+  fZpbIds := TelSimpleLongIdList.Create;
+  fZpbdIds := TelSimpleLongIdList.Create;
+  FMedIds := TelSimpleLongIdList.Create;
+  FZpttrIds := TelSimpleLongIdList.Create;
+  FZpttreanlIds := TelSimpleLongIdList.Create;
+  fLschIds := TelSimpleLongIdList.Create;
+  fLschPrzIdStornos := TelSimpleLongIdList.Create;
+  FLsmwIds := TelSimpleLongIdList.Create;
+  FLsmhIds := TelSimpleLongIdList.Create;
+  fVbaNummern := TelSimpleLongIdList.Create;
+  fVerIds := TelSimpleLongIdList.Create;
+  fVetNummern := TelSimpleLongIdList.Create;
+  FZpkIds := TelSimpleLongIdList.Create;
+  fGpvgIds := TelSimpleLongIdList.Create;
+  FHzoNrList := TStringList.Create;
+  FAstpIds := TelSimpleLongIdList.Create;
+  FAaufIds := TelSimpleLongIdList.Create;
+  FAafeIds := TelSimpleLongIdList.Create;
+  FAauiIds := TelSimpleLongIdList.Create;
+  FAausIds := TelSimpleLongIdList.Create;
+  FAaubIds := TelSimpleLongIdList.Create;
+  FAkaIds := TelSimpleLongIdList.Create;
+  FAkaIdsExportiert := TelSimpleLongIdList.Create;
+  FAprPrzIds := TelSimpleLongIdList.Create;
+  FAprPrzIdsExportiert := TelSimpleLongIdList.Create;
+  FRemPrzIdsUmbuchung := TelSimpleLongIdList.Create;
+  FAbmIds := TelSimpleLongIdList.Create;
+  FAbkIds := TelSimpleLongIdList.Create;
+  FAbzIds := TelSimpleLongIdList.Create;
+  FAbwIds := TelSimpleLongIdList.Create;
+  FAauwIds := TelSimpleLongIdList.Create;
+  FAzzuIds := TelSimpleLongIdList.Create;
+  FZsteIds := TelSimpleLongIdList.Create;
+  FZsefIds := TelSimpleLongIdList.Create;
+  FZseiIds := TelSimpleLongIdList.Create;
+  FZmweIds := TelSimpleLongIdList.Create;
+  FZmweIdsExportiert := TelSimpleLongIdList.Create;
+  FZmwzIds := TelSimpleLongIdList.Create;
+  FZstepIds := TelSimpleLongIdList.Create;
+  FAmmrIds := TelSimpleLongIdList.Create;
+  FMwmemaIds := TelSimpleLongIdList.Create;
+  FZpoeIds := TelSimpleLongIdList.Create;
+  FZptemIds := TelSimpleLongIdList.Create;
+  FMnnIds := TelSimpleLongIdList.Create;
+  FMnaIds := TelSimpleLongIdList.Create;
+  FArtIds := TelSimpleLongIdList.Create;
+  FGartIds := TelSimpleLongIdList.Create;
+
+  FAbnIdsExportiert := TelSimpleLongIdList.Create;
+  FZpkIdsExportiert := TelSimpleLongIdList.Create;
+  FGerpIdsExportiert := TelSimpleLongIdList.Create;
+
+  fFldNamen := TStringList.Create;
+  fObsBezeichnungenMeLo := TStringList.Create;
+  fObsBezeichnungenMaLo := TStringList.Create;
+  fMeteringcodes := TStringList.Create;
+
+  FNbtNrAusKnvList := TStringList.Create;
+  FMpidNrList := TStringList.Create;
+
+  fENZPTTR := 'CREATOR.ENZPTTRANCHE';
+  fENZPTTREANL := 'CREATOR.ENZPTTREANL';
+
+  qryAnlagenGemeinsameMessung := fConnection.CreateSQLQuery;
+  qryAnlagenAusGruppe := fConnection.CreateSQLQuery;
+  qryAnlagenAusSpeicherZuordnung := fConnection.CreateSQLQuery;
+  qrySpeicherAusSpeicherZuordnung := fConnection.CreateSQLQuery;
+  qryUltimate := fConnection.CreateSQLQuery;
+
+  qryAnlagenGemeinsameMessung.SQL.Add(fSelectAnlagenMitGemeinsamerMessung);
+  qryAnlagenAusGruppe.SQL.Add(fSelectAnlagenAusAnlagengruppe);
+  qryAnlagenAusSpeicherZuordnung.SQL.Add(fSelectAnlagenAusSpeicherZuordnung);
+  qrySpeicherAusSpeicherZuordnung.SQL.Add(fSelectSpeicherAusSpeicherZuordnung);
+
+  qryUltimate.SQL.Add('SELECT 1 FROM dual');
+  qryUltimate.Prepared := True;
+  qryAnlagenGemeinsameMessung.Prepared := True;
+  qryAnlagenAusGruppe.Prepared := True;
+  if (TDBTableInfo.TableExists(ENEANLSP)) then
+  begin
+    qryAnlagenAusSpeicherZuordnung.prepared := True;
+    qrySpeicherAusSpeicherZuordnung.Prepared := True;
+  end;
+
+  FSdManager.Initialize(fMndId);
+
+  // ID Mapping
+  TableIdMapping := TelStringObjectMap<TelSimpleLongIdList>.Create(true);
+  RegisterTableIdList(ENATN); // in VFA gesammelt und ATN, ATZ exportieren
+  RegisterTableIdList(ENVBE); // in ENZPO gesammelt
+  RegisterTableIdList(ENSMTP); // um weitere ENVBE zu exportieren ()
+  RegisterTableIdList(ENABS);
+  RegisterTableIdList('ABT_PRZ'); // Prozesse in ENABT
+  RegisterTableIdList(ENABSR);
+  RegisterTableIdList(ENABSZ);
+  RegisterTableIdList(ENVZR);
+  RegisterTableIdList(ENVZZ);
+  RegisterTableIdList(ENESA);
+  RegisterTableIdList(ENESAM);
+  RegisterTableIdList(ENEGA);
+  RegisterTableIdList(ENEGAM);
+  RegisterTableIdList(ENEWA);
+  RegisterTableIdList(ENEWAM);
+  RegisterTableIdList(ENPRDU);
+  RegisterTableIdList(ENPRDM);
+  RegisterTableIdList(ENPRDT);
+  RegisterTableIdList(ENTUA);
+  RegisterTableIdList(ENPRZ); // Prozesse aus ENPRDM
+  RegisterTableIdList(CRGPVT);
+//  RegisterTableIdList(CRRAB);
+  RegisterTableIdList(ENGBZD);
+
+  RegisterTableIdList(ENERVZP);
+  RegisterTableIdList(ENERVA);
+  RegisterTableIdList(ENERVZT);
+  RegisterTableIdList(ENERV);
+  RegisterTableIdList(ENERV+'EXP');
+  RegisterTableIdList(ENTRE);
+
+  RegisterTableIdList(ART_EXP_CHECK);
+  RegisterTableIdList(GART_EXP_CHECK);
+
+  FExportObjectManager.Initialize(FExportOptionen, nil, nil);
+end;
+
+destructor TKundenExport.Destroy;
+begin
+  inherited;
+  FExportLog.Free;
+  FEanlIdsExportiert.Free;
+  FGerpIds.Free;
+  FZptIdsExportiert.Free;
+  FKndIdsExportiert.Free;
+  FEanbIds.Free;
+  FEanbIdsExportiert.Free;
+  FLifIds.Free;
+  FMvaIds.Free;
+
+  FRgzIds.Free;
+  FBigIds.Free;
+  FNetIds.Free;
+  FLprIds.Free;
+  FNbtIds.Free;
+  FMbtIds.free;
+  fEAGIds.Free;
+  fEAGTIds.Free;
+  fBikIds.Free;
+  FZrtIds.Free;
+  FAvmpIds.Free;
+  FBereitsExportiertePrzIds.Free;
+  FZpgIds.Free;
+  FZpgIdsExportiert.Free;
+  FGtwIds.Free;
+  FGtwIdsExportiert.Free;
+
+  FGtaIds.Free;
+  fZaeIds.Free;
+  fZaeIdsExportiert.Free;
+  fEAPWIds.Free;
+  fZPTHIds.Free;
+  fGBZIds.Free;
+  fZpbIds.Free;
+  fZpbdIds.Free;
+  FMedIds.Free;
+  FZpttrIds.Free;
+  FZpttreanlIds.Free;
+  FLschIds.Free;
+  fLschPrzIdStornos.Free;
+  FLsmwIds.Free;
+  FLsmhIds.Free;
+  fVbaNummern.Free;
+  fVerIds.Free;
+  fVetNummern.Free;
+  FZpkIds.Free;
+  fGpvgIds.Free;
+  FHzoNrList.Free;
+  FAstpIds.Free;
+  FAaufIds.Free;
+  FAafeIds.Free;
+  FAauiIds.Free;
+  FAausIds.Free;
+  FAaubIds.Free;
+  FAkaIds.Free;
+  FAkaIdsExportiert.Free;
+  FAprPrzIds.Free;
+  FAprPrzIdsExportiert.Free;
+  FRemPrzIdsUmbuchung.Free;
+  FAbmIds.Free;
+  FAbkIds.Free;
+  FAbzIds.Free;
+  FAbwIds.Free;
+  FAauwIds.Free;
+  FAzzuIds.Free;
+  FZsteIds.Free;
+  FZsefIds.Free;
+  FZseiIds.Free;
+  FZmweIds.Free;
+  FZmweIdsExportiert.Free;
+  FZmwzIds.Free;
+  FZstepIds.Free;
+  FAmmrIds.Free;
+  FMwmemaIds.Free;
+  FZpoeIds.Free;
+  FZptemIds.Free;
+  FMnnIds.Free;
+  FMnaIds.Free;
+  FArtIds.Free;
+  FGartIds.Free;
+  FAbnIdsExportiert.Free;
+
+  fFldNamen.Free;
+  fObsBezeichnungenMeLo.Free;
+  fObsBezeichnungenMaLo.Free;
+  fMeteringcodes.Free;
+  FZpkIdsExportiert.Free;
+  FGerpIdsExportiert.Free;
+  FNbtNrAusKnvList.Free;
+  FMpidNrList.Free;
+
+  qryUltimate.Free;
+  qryAnlagenGemeinsameMessung.Free;
+  qryAnlagenAusGruppe.Free;
+  qryAnlagenAusSpeicherZuordnung.Free;
+  qrySpeicherAusSpeicherZuordnung.Free;
+
+  fXmlStream.Free;
+  FSdManager.Free;
+  FreeAndNil(FMndMasterIds);
+  FreeAndNil(FGpAdrInfoManager);
+  TableIdMapping.Free;
+  FExportObjectManager.Free;
+
+  FreeAndNil(FQrySelectEpzl);
+  FreeAndNil(FQrySelectEel);
+  FreeAndNil(FEexSelectErledigt);
+end;
+
+procedure TKundenExport.CheckAndLogKndIdExport(AKndId: TLongId; AGrundFuerHinzufuegen: String; AMndKndIdListe: TelSimpleLongIdList);
+var msg: String;
+begin
+  if not AMndKndIdListe.Contains(AKndId) then
+  begin
+    msg := 'Indirekt verknüpften Kunden nicht exportiert: KndId = ' + AKndId.ToStr;
+    if AGrundFuerHinzufuegen <> '' then
+      msg := msg + ' (' + AGrundFuerHinzufuegen + ')';
+    AddToExportLog(msg);
+  end;
+end;
+
+procedure TKundenExport.CheckModule;
+begin
+  fEinsmanTabellenVorhanden := TDBTableInfo.TableExists(ENERV);
+  fEEG2017ZuschlagTabellenVorhanden := TDBTableInfo.TableExists(ENEAZU);
+  fEPEXTabellenVorhanden := TDBTableInfo.TableExists(ENEAEAM);
+end;
+
+procedure TKundenExport.ClearIds;
+var
+  I: Integer;
+begin
+  FGerpIds.Clear;
+  FEanbIds.Clear;
+  FEanbIdsExportiert.Clear;
+  FLifIds.Clear;
+  FMvaIds.Clear;
+  FRgzIds.Clear;
+  FBigIds.Clear;
+  FNetIds.Clear;
+  FLprIds.Clear;
+  FNbtIds.Clear;
+  FMbtIds.Clear;
+  fEAGIds.Clear;
+  fEAGTIds.Clear;
+  fBikIds.Clear;
+  FZrtIds.Clear;
+  FAvmpIds.Clear;
+  FBereitsExportiertePrzIds.Clear;
+  FZpgIds.Clear;
+  FZpgIdsExportiert.Clear;
+  FGtwIds.Clear;
+  FGtwIdsExportiert.Clear;
+  FGtaIds.Clear;
+  fZaeIds.Clear;
+  fZaeIdsExportiert.Clear;
+  fEAPWIds.Clear;
+  fZPTHIds.Clear;
+  fGBZIds.Clear;
+  fZpbIds.Clear;
+  fZpbdIds.Clear;
+  FMedIds.Clear;
+  FEanlIdsExportiert.Clear;
+  FZptIdsExportiert.Clear;
+  FKndIdsExportiert.Clear;
+  FZpttrIds.Clear;
+  FZpttreanlIds.Clear;
+  FLschIds.Clear;
+  fLschPrzIdStornos.Clear;
+  FLsmwIds.Clear;
+  FLsmhIds.Clear;
+  fVbaNummern.Clear;
+  fVerIds.Clear;
+  fVetNummern.Clear;
+  fFldNamen.Clear;
+  fObsBezeichnungenMeLo.Clear;
+  fObsBezeichnungenMaLo.Clear;
+  fMeteringcodes.Clear;
+  FZpkIds.Clear;
+  fGpvgIds.Clear;
+  FHzoNrList.Clear;
+  FAstpIds.Clear;
+  FNbtNrAusKnvList.Clear;
+  FMpidNrList.Clear;
+  FAaufIds.Clear;
+  FAafeIds.Clear;
+  FAauiIds.Clear;
+  FAausIds.Clear;
+  FAaubIds.Clear;
+  FAkaIds.Clear;
+  FAkaIdsExportiert.Clear;
+  FAprPrzIds.Clear;
+  FAprPrzIdsExportiert.Clear;
+  FRemPrzIdsUmbuchung.Clear;
+  FAbmIds.Clear;
+  FAbkIds.Clear;
+  FAbzIds.Clear;
+  FAbwIds.Clear;
+  FAauwIds.Clear;
+  FAzzuIds.Clear;
+  FZsteIds.Clear;
+  FZsefIds.Clear;
+  FZseiIds.Clear;
+  FZmweIds.Clear;
+  FZmweIdsExportiert.Clear;
+  FZmwzIds.Clear;
+  FZstepIds.Clear;
+  FAmmrIds.Clear;
+  FMwmemaIds.Clear;
+  FZpoeIds.Clear;
+  FZptemIds.Clear;
+  FMnnIds.Clear;
+  FMnaIds.Clear;
+  FArtIds.Clear;
+  FGartIds.Clear;
+
+  FAbnIdsExportiert.Clear;
+  FZpkIdsExportiert.Clear;
+  FGerpIdsExportiert.Clear;
+
+  FreeAndNil(FEexSelectErledigt);
+  for I := 0 to TableIdMapping.Count - 1 do
+    TableIdMapping.Objects[I].Clear;
+
+  for I := 0 to FExportObjectManager.Count - 1 do
+    FExportObjectManager[i].Clear;
+end;
+
+procedure TKundenExport.DoExportDaten(AMndMasterIds: TExportMndMasterIds);
+var
+  Qry: TSQLQuery;
+  cnt, cntNeu, cntAlt: Integer;
+  neueZpgs: Boolean;
+  i: Integer;
+  neueIdsSelektiert: Boolean;
+  MndIds: TelSimpleLongIdList;
+begin
+  Qry := fConnection.CreateSQLQuery;
+  MndIds := TelSimpleLongIdList.Create;
+  try
+    CheckIsCanceled;
+
+    ClearIds;
+    SetStatus('Exportiere Daten (MndId: ' + IntToStr(AMndMasterIds.MndId) + ' / KndIds: ' + AMndMasterIds.KndIds.GetUniqueCommaList + ')');
+    FExportMndId := AMndMasterIds.MndId;
+    FEckdaten.AddExportMndId(FExportMndId);
+    MndIds.Add(TLongId.From(FExportMndId));
+    InitSelects(FExportMndId);
+
+    FExportObjectManager.ObjENKZB.DoInitialSelectByKndIds(fConnection, AMndMasterIds.MndId, AMndMasterIds.KndIds);
+    CheckIsCanceled;
+
+    FExportObjectManager.ObjENKZE.DoInitialSelectByKndIds(fConnection, AMndMasterIds.MndId, AMndMasterIds.KndIds);
+    CheckIsCanceled;
+
+    FExportObjectManager.ObjEDINV.DoInitialSelectByZptIds(fConnection, AMndMasterIds.MndId, AMndMasterIds.ZptIds);
+    CheckIsCanceled;
+
+    FExportObjectManager.ObjEDINV.DoInitialSelectByMlkIds(fConnection, AMndMasterIds.MndId, AMndMasterIds.ZptIds);
+    CheckIsCanceled;
+
+    FExportObjectManager.ObjEDQUO.DoInitialSelectByMlkIds(fConnection, AMndMasterIds.MndId, AMndMasterIds.MlkIds);
+    CheckIsCanceled;
+
+    FExportObjectManager.ObjEDORD.DoInitialSelectByZptIds(fConnection, AMndMasterIds.MndId, AMndMasterIds.ZptIds);
+    CheckIsCanceled;
+
+    FExportObjectManager.ObjEDORD.DoInitialSelectByMlkIds(fConnection, AMndMasterIds.MndId, AMndMasterIds.ZptIds);
+    CheckIsCanceled;
+
+    FExportObjectManager.ObjEDUTZP.DoInitialSelectByZptIds(fConnection, AMndMasterIds.MndId, AMndMasterIds.ZptIds);
+    CheckIsCanceled;
+
+    FExportObjectManager.ObjEDUTZP.DoInitialSelectByMlkIds(fConnection, AMndMasterIds.MndId, AMndMasterIds.MlkIds);
+    CheckIsCanceled;
+
+    FExportObjectManager.ObjENLOKB.DoInitialSelectByAbnIds(fConnection, AMndMasterIds.AbnIds);
+    CheckIsCanceled;
+
+    FExportObjectManager.ObjENTRE.DoInitialSelectByZptIds(fConnection, AMndMasterIds.MndId, AMndMasterIds.ZptIds);
+    CheckIsCanceled;
+
+    FExportObjectManager.ObjENTRE.DoInitialSelectByMlkIds(fConnection, AMndMasterIds.MndId, AMndMasterIds.MlkIds);
+    CheckIsCanceled;
+
+    FExportObjectManager.ObjENSRE.DoInitialSelectByAbnIds(fConnection, AMndMasterIds.AbnIds);
+    CheckIsCanceled;
+
+    FExportObjectManager.ObjENSDAK.DoInitialSelectByZptIds(fConnection, AMndMasterIds.MndId, AMndMasterIds.ZptIds);
+    CheckIsCanceled;
+
+    FExportObjectManager.ObjENNWM.DoInitialSelectByMlkIds(fConnection, AMndMasterIds.MndId, AMndMasterIds.MlkIds);
+    CheckIsCanceled;
+
+    ExportTabelle(AMndMasterIds.KndIds, fSelectENKND, ENKND, 'knd_id', AMndMasterIds.KndIds);
+    CheckIsCanceled;
+
+    ExportTabelle(AMndMasterIds.KndIds, fSelectENMESUeberKndId, ENMES, 'knd_id', AMndMasterIds.KndIds);
+    CheckIsCanceled;
+
+    if (TDBTableInfo.TableExists(fENZPTTR)) then
+    begin
+      ExportTabelle(AMndMasterIds.KndIds, fSelectENZPTTR, fENZPTTR, 'zpt_id', AMndMasterIds.ZptIds);
+    end;
+
+    ExportTabelle(AMndMasterIds.KndIds, 'SELECT * FROM ' + ENMLU + ' WHERE ZPT_ID_MELO = :zpt_id', ENMLU, 'zpt_id', AMndMasterIds.ZptIds);
+
+    ExportTabelle(AMndMasterIds.KndIds, fSelectENMES, ENMES, 'zpt_id', AMndMasterIds.ZptIds);
+
+    ExportTabelle(AMndMasterIds.KndIds, fSelectENZPT, ENZPT, 'zpt_id', AMndMasterIds.ZptIds);
+
+    ExportTabelle(AMndMasterIds.KndIds, fSelectZPT_ENZPTH_DEBITOR, ENZPT, 'zpt_id', AMndMasterIds.ZptIds);
+
+    ExportTabelle(AMndMasterIds.KndIds, fSelectENZPTH_DEBITOR, ENZPTH, 'zpt_id', AMndMasterIds.ZptIds);
+
+    ExportTabelle(AMndMasterIds.KndIds, fSelectENZPT, ENZPT, 'zpt_id', AMndMasterIds.ZptIds);
+
+    ExportTabelle(AMndMasterIds.KndIds, fSelectENZPK, ENZPK, 'zpk_id', FZpkIds);
+
+    ExportTabelle(AMndMasterIds.KndIds, fSelectENZPG, ENZPG, 'zpt_id', AMndMasterIds.ZptIds);
+
+    SetStatus('Exportiere Zpg-Daten (MndId: ' + IntToStr(AMndMasterIds.MndId) + ' / KndIds: ' + AMndMasterIds.KndIds.GetUniqueCommaList + ')');
+    neueZpgs := true;
+    // Generiert evtl. neue ZPGs
+    cntAlt := FZpgIds.Count;
+    ExportTabelle(AMndMasterIds.KndIds, fSelectENSMA, ENSMA, 'zpt_id', AMndMasterIds.ZptIds);
+    cnt := FZpgIds.Count - cntAlt;
+    // Mehrfach-Verknüpfungen über GBZ
+    // Generiert evtl. (indirekt) neue GerpIds, AbnIds und ZpgIds
+    while neueZpgs do
+    begin
+      CheckIsCanceled;
+      cntAlt := FZpgIds.Count;
+      ExportTabelle(AMndMasterIds.KndIds, fSelectENGBZSlave, ENGBZ, 'zpg_id', FZpgIds);
+      ExportTabelle(AMndMasterIds.KndIds, fSelectENGBZMaster, ENGBZ, 'zpg_id', FZpgIds);
+      ExportTabelle(AMndMasterIds.KndIds, fSelectENGTW_ALT, ENGTW, 'zpg_id', FZpgIds);
+      ExportTabelle(AMndMasterIds.KndIds, fSelectENGTW_NEU, ENGTW, 'zpg_id', FZpgIds);
+      cntNeu := FZpgIds.Count - cntAlt;
+      neueZpgs := cntNeu > 0;
+      cnt := cnt + cntNeu;
+    end;
+
+    if cnt > 0 then
+       ExportTabelle(AMndMasterIds.KndIds, fSelectENZPG_ZPG, ENZPG, 'zpg_id', FZpgIds);
+
+    SetStatus('Exportiere weitere Daten (MndId: ' + IntToStr(AMndMasterIds.MndId) + ' / KndIds: ' + AMndMasterIds.KndIds.GetUniqueCommaList + ', #1)');
+    ExportTabelle(AMndMasterIds.KndIds, fSelectENGERP, ENGERP, 'zpg_id', FZpgIds);
+    ExportTabelle(AMndMasterIds.KndIds, fSelectENGERP_ABN, ENGERP, 'abn_id', AMndMasterIds.AbnIds);
+    ExportTabelle(AMndMasterIds.KndIds, fSelectENABN, ENABN, 'abn_id', AMndMasterIds.AbnIds);
+    ExportTabelle(AMndMasterIds.KndIds, fSelectENABNGMD, ENABNGMD, 'abn_id', AMndMasterIds.AbnIds);
+
+    ExportTabelle(AMndMasterIds.KndIds, fSelectENMVA, ENMVA, 'zpt_id', AMndMasterIds.ZptIds);
+
+    ExportTabelle(AMndMasterIds.KndIds, fSelectENZPO, ENZPO, 'zpt_id', AMndMasterIds.ZptIds);
+
+
+    ExportTabelle(AMndMasterIds.KndIds, fSelectENZPOVR, ENZPOVR, 'zpt_id', AMndMasterIds.ZptIds);
+    ExportTabelle(AMndMasterIds.KndIds, fSelectENZPOV, ENZPOV, 'zpt_id', AMndMasterIds.ZptIds);
+
+    ExportTabelle(AMndMasterIds.KndIds, fSelectENZPOE, ENZPOE, 'zpt_id', AMndMasterIds.ZptIds);
+
+    ExportTabelle(AMndMasterIds.KndIds, FSelectENZPMPR, ENZPMPR, 'zpt_id', AMndMasterIds.ZptIds);
+    ExportTabelle(AMndMasterIds.KndIds, FSelectENZPMVR, ENZPMVR, 'zpt_id', AMndMasterIds.ZptIds);
+    ExportTabelle(AMndMasterIds.KndIds, FSelectENZPMV, ENZPMV, 'zpt_id', AMndMasterIds.ZptIds);
+
+    ExportTabelle(AMndMasterIds.KndIds, fSelectENZPZ, ENZPZ, 'zpt_id', AMndMasterIds.ZptIds);
+
+    ExportTabelle(AMndMasterIds.KndIds, fSelectENZPS, ENZPS, 'zpt_id', AMndMasterIds.ZptIds);
+
+    ExportTabelle(AMndMasterIds.KndIds, fSelectENZPB, ENZPB, 'zpt_id', AMndMasterIds.ZptIds);
+
+    ExportTabelle(AMndMasterIds.KndIds, fSelectENZPBD, ENZPBD, 'zpt_id', AMndMasterIds.ZptIds);
+
+    ExportTabelle(AMndMasterIds.KndIds, fSelectENZPN, ENZPN, 'zpt_id', AMndMasterIds.ZptIds);
+
+    ExportTabelle(AMndMasterIds.KndIds, fSelectENMLK, ENMLK, 'zpt_id', AMndMasterIds.ZptIds);
+
+    ExportTabelle(AMndMasterIds.KndIds, fSelectENZMLK, ENZMLK, 'zpt_id', AMndMasterIds.ZptIds);
+
+    ExportTabelle(AMndMasterIds.KndIds, fSelectENMED, ENMED, 'zpt_id', AMndMasterIds.ZptIds);
+
+    ExportTabelle(AMndMasterIds.KndIds, fSelectENZMB, ENZMB, 'zpt_id', AMndMasterIds.ZptIds);
+
+    ExportTabelle(AMndMasterIds.KndIds, fSelectENZLF, ENZLF, 'zpt_id', AMndMasterIds.ZptIds);
+
+    ExportTabelle(AMndMasterIds.KndIds, fSelectENPRZRA, ENPRZRA, 'knd_id', AMndMasterIds.KndIds);
+
+    ExportTabelle(AMndMasterIds.KndIds, fSelectENGBZD, ENGBZD, 'gbzd_id', TableIdMapping.Values[ENGBZD]);
+
+    ExportTabelle(AMndMasterIds.KndIds, fSelectENZPD, ENZPD, 'zpt_id', AMndMasterIds.ZptIds);
+
+    if (TDBTableInfo.TableExists(fENZPTTREANL)) then
+    begin
+      ExportTabelle(AMndMasterIds.KndIds, fSelectENZPTTREANL, fENZPTTREANL, 'zpt_id', AMndMasterIds.ZptIds);
+    end;
+
+    ExportTabelle(AMndMasterIds.KndIds, fSelectENZAE, ENZAE, 'zae_id', FZaeIds);
+
+    ExportTabelle(AMndMasterIds.KndIds, fSelectENZZK, ENZZK, 'zae_id', FZaeIds);
+
+    ExportTabelle(AMndMasterIds.KndIds, fSelectCRGPVG, CRGPVG, 'knd_id', AMndMasterIds.KndIds);
+
+    ExportTabelle(AMndMasterIds.KndIds, fSelectCRGPVL, CRGPVL, 'knd_id', AMndMasterIds.KndIds);
+
+    ExportTabelle(AMndMasterIds.KndIds, fSelectCRGPVTU, CRGPVTU, 'knd_id', AMndMasterIds.KndIds);
+
+    ExportTabelle(AMndMasterIds.KndIds, fSelectENLSCH, ENLSCH, 'knd_id', AMndMasterIds.KndIds);
+
+    ExportTabelle(AMndMasterIds.KndIds, fSelectENLSMW, ENLSMW, 'lsch_id', fLschIds);
+    ExportTabelle(AMndMasterIds.KndIds, fSelectENPRZ, ENPRZ, 'prz_id', fLschPrzIdStornos);
+
+    ExportTabelle(AMndMasterIds.KndIds, fSelectENLSMH, ENLSMH, 'lsmw_id', FLsmwIds);
+
+    ExportTabelle(AMndMasterIds.KndIds, fSelectENKVE, ENKVE, 'knd_id', AMndMasterIds.KndIds);
+
+    ExportTabelle(AMndMasterIds.KndIds, fSelectENKVP, ENKVP, 'ver_id', FVerIds);
+
+    ExportTabelle(AMndMasterIds.KndIds, fSelectENVER, ENVER, 'ver_id', FVerIds);
+
+    ExportTabelle(AMndMasterIds.KndIds, fSelectENVET, ENVET, 'vet_nr', fVetNummern);
+
+    ExportTabelle(AMndMasterIds.KndIds, fSelectENZLF, ENZLF, 'zpt_id', AMndMasterIds.ZptIds);
+
+    ExportTabelle(AMndMasterIds.KndIds, fSelectCRGPVR, CRGPVR, 'gpvg_id', fGpvgIds);
+
+    ExportTabelle(AMndMasterIds.KndIds, fSelectENZTH, ENZTH, 'zpt_id', AMndMasterIds.ZptIds);
+
+    ExportTabelle(AMndMasterIds.KndIds, fSelectENASTZ, ENASTZ, 'zpt_id', AMndMasterIds.ZptIds);
+    ExportTabelle(AMndMasterIds.KndIds, fSelectENASTP, ENASTP, 'astp_id', FAstpIds);
+
+    ExportTabelle(AMndMasterIds.KndIds, fSelectENAAUF, ENAAUF, 'zpt_id', AMndMasterIds.ZptIds);
+    ExportTabelle(AMndMasterIds.KndIds, fSelectENAAFE, ENAAFE, 'aauf_id', FAAufIds);
+    ExportTabelle(AMndMasterIds.KndIds, fSelectENAAUI, ENAAUI, 'aauf_id', FAAufIds);
+    ExportTabelle(AMndMasterIds.KndIds, fSelectENAAUS, ENAAUS, 'aauf_id', FAAufIds);
+    ExportTabelle(AMndMasterIds.KndIds, fSelectENAAUB, ENAAUB, 'aauf_id', FAAufIds);
+    ExportTabelle(AMndMasterIds.KndIds, fSelectENAKA, ENAKA, 'aka_id', FAkaIds);
+    ExportTabelle(AMndMasterIds.KndIds, fSelectENAPR, ENAPR, 'prz_id', FAprPrzIds);
+    ExportTabelle(AMndMasterIds.KndIds, fSelectENPRZ, ENPRZ, 'prz_id', FAprPrzIds);
+    ExportTabelle(AMndMasterIds.KndIds, fSelectENPRZ, ENPRZ, 'prz_id', FRemPrzIdsUmbuchung);
+
+    ExportTabelle(AMndMasterIds.KndIds, fSelectENABM, ENABM, 'zpt_id', AMndMasterIds.ZptIds);
+    ExportTabelle(AMndMasterIds.KndIds, fSelectENABZ, ENABZ, 'abm_id', FAbmIds);
+    ExportTabelle(AMndMasterIds.KndIds, fSelectENABK, ENABK, 'abz_id', FAbzIds);
+    ExportTabelle(AMndMasterIds.KndIds, fSelectENABW, ENABW, 'abk_id', FAbkIds);
+    ExportTabelle(AMndMasterIds.KndIds, fSelectENAAUW, ENAAUW, 'aauf_id', FAAufIds);
+    ExportTabelle(AMndMasterIds.KndIds, fSelectENAZZU, ENAZZU, 'aauf_id', FAAufIds);
+
+    ExportTabelle(AMndMasterIds.KndIds, fSelectENZSTE, ENZSTE, 'zpt_id', AMndMasterIds.ZptIds);
+    ExportTabelle(AMndMasterIds.KndIds, fSelectENZSEF, ENZSEF, 'zste_id', FZsteIds);
+    ExportTabelle(AMndMasterIds.KndIds, fSelectENZSEI, ENZSEI, 'zste_id', FZsteIds);
+    ExportTabelle(AMndMasterIds.KndIds, fSelectENZMWE, ENZMWE, 'zste_id', FZsteIds);
+    ExportTabelle(AMndMasterIds.KndIds, fSelectENZMWZ, ENZMWZ, 'zmwe_id', FZmweIds);
+    ExportTabelle(AMndMasterIds.KndIds, fSelectENZSTEP, ENZSTEP, 'zste_id', FZsteIds);
+    ExportTabelle(AMndMasterIds.KndIds, fSelectENAMMR, ENAMMR, 'aauf_id', FAAufIds);
+    ExportTabelle(AMndMasterIds.KndIds, fSelectENMWMEMA, ENMWMEMA, 'zpoe_id', FZpoeIds);
+
+    ExportTabelle(AMndMasterIds.KndIds, fSelectENZPTEM, ENZPTEM, 'zpt_id', AMndMasterIds.ZptIds);
+    ExportTabelle(AMndMasterIds.KndIds, fSelectENZPTMA, ENZPTMA, 'zptem_id', FZptemIds);
+
+    ExportTabelle(AMndMasterIds.KndIds, fSelectENZPM, ENZPM, 'zpt_id', AMndMasterIds.ZptIds);
+    ExportTabelle(AMndMasterIds.KndIds, fSelectENZMK, ENZMK, 'zpt_id', AMndMasterIds.ZptIds);
+    ExportTabelle(AMndMasterIds.KndIds, fSelectENZAP, ENZAP, 'zpt_id', AMndMasterIds.ZptIds);
+    ExportTabelle(AMndMasterIds.KndIds, fSelectENKAKZ, ENKAKZ, 'zpt_id', AMndMasterIds.ZptIds);
+    ExportTabelle(AMndMasterIds.KndIds, fSelectENMVAV, ENMVAV, 'zpt_id', AMndMasterIds.ZptIds);
+    ExportTabelle(AMndMasterIds.KndIds, fSelectENMPMLK, ENMPMLK, 'zpt_id', AMndMasterIds.ZptIds);
+    ExportTabelle(AMndMasterIds.KndIds, fSelectENZPL, ENZPL, 'zpt_id', AMndMasterIds.ZptIds);
+    ExportTabelle(AMndMasterIds.KndIds, fSelectENZPTB, ENZPTB, 'zpt_id', AMndMasterIds.ZptIds);
+    ExportTabelle(AMndMasterIds.KndIds, fSelectENZPTI, ENZPTI, 'zpt_id', AMndMasterIds.ZptIds);
+    ExportTabelle(AMndMasterIds.KndIds, fSelectENZPH, ENZPH, 'zpt_id', AMndMasterIds.ZptIds);
+    ExportTabelle(AMndMasterIds.KndIds, fSelectENZPHV, ENZPHV, 'zpt_id', AMndMasterIds.ZptIds);
+
+    ExportTabelle(AMndMasterIds.KndIds, fSelectENZPGD, ENZPGD, 'zpg_id', FZpgIds);
+    ExportTabelle(AMndMasterIds.KndIds, fSelectENZPGS, ENZPGS, 'zpg_id', FZpgIds);
+
+    ExportTabelle(AMndMasterIds.KndIds, fSelectENTGW, ENTGW, 'gtw_id', FGtwIds);
+    ExportTabelle(AMndMasterIds.KndIds, fSelectENTGWS, ENTGWS, 'gtw_id', FGtwIds);
+    ExportTabelle(AMndMasterIds.KndIds, fSelectENGTA, ENGTA, 'gta_id', FGtaIds);
+
+    // ESM
+    if AMndMasterIds.EanlIds.Count > 0 then
+    begin
+      SetStatus('Exportiere ESM-Daten (MndId: ' + IntToStr(AMndMasterIds.MndId) + ' / KndIds: ' + AMndMasterIds.KndIds.GetUniqueCommaList + ')');
+      ExportTabelle(AMndMasterIds.KndIds, fSelectENEANL, ENEANL, 'eanl_id', AMndMasterIds.EanlIds);
+      ExportTabelle(AMndMasterIds.KndIds, fSelectENAVMP, ENAVMP, 'zpt_id', AMndMasterIds.ZptIds);
+      ExportTabelle(AMndMasterIds.KndIds, fSelectENEAPW, ENEAPW, 'eanl_id', AMndMasterIds.EanlIds);
+      ExportTabelle(AMndMasterIds.KndIds, fSelectENEZPA, ENEZPA, 'eanl_id', AMndMasterIds.EanlIds);
+      ExportTabelle(AMndMasterIds.KndIds, fSelectENEZPAV, ENEZPAV, 'eanl_id', AMndMasterIds.EanlIds);
+      ExportTabelle(AMndMasterIds.KndIds, fSelectENEAV, ENEAV, 'eanl_id', AMndMasterIds.EanlIds);
+      ExportTabelle(AMndMasterIds.KndIds, fSelectENEAVS, ENEAVS, 'eanl_id', AMndMasterIds.EanlIds);
+      ExportTabelle(AMndMasterIds.KndIds, fSelectENEAVSV, ENEAVSV, 'eanl_id', AMndMasterIds.EanlIds);
+      ExportTabelle(AMndMasterIds.KndIds, fSelectENEANB, ENEANB, 'eanl_id', AMndMasterIds.EanlIds);
+      ExportTabelle(AMndMasterIds.KndIds, fSelectENEAD, ENEAD, 'eanl_id', AMndMasterIds.EanlIds);
+      ExportTabelle(AMndMasterIds.KndIds, fSelectENEAB, ENEAB, 'eanl_id', AMndMasterIds.EanlIds);
+      ExportTabelle(AMndMasterIds.KndIds, fSelectENEABT, ENEABT, 'eanl_id', AMndMasterIds.EanlIds);
+      ExportTabelle(AMndMasterIds.KndIds, fSelectENEABP, ENEABP, 'eanl_id', AMndMasterIds.EanlIds);
+      ExportTabelle(AMndMasterIds.KndIds, fSelectENEAG, ENEAG, 'eanl_id', AMndMasterIds.EanlIds);
+      ExportTabelle(AMndMasterIds.KndIds, fSelectENEAGT, ENEAGT, 'eanl_id', AMndMasterIds.EanlIds);
+      ExportTabelle(AMndMasterIds.KndIds, fSelectENEASE, ENEASE, 'eanl_id', AMndMasterIds.EanlIds);
+      ExportTabelle(AMndMasterIds.KndIds, fSelectENERG, ENERG, 'eanl_id', AMndMasterIds.EanlIds);
+      ExportTabelle(AMndMasterIds.KndIds, fSelectENEARG, ENEARG, 'eanl_id', AMndMasterIds.EanlIds);
+
+      ExportTabelle(AMndMasterIds.KndIds, fSelectENEAZU, ENEAZU, 'eanl_id', AMndMasterIds.EanlIds);
+      ExportTabelle(AMndMasterIds.KndIds, fSelectENEAZUD, ENEAZUD, 'eanl_id', AMndMasterIds.EanlIds);
+      ExportTabelle(AMndMasterIds.KndIds, fSelectENEAEAM, ENEAEAM, 'eanl_id', AMndMasterIds.EanlIds);
+      ExportTabelle(AMndMasterIds.KndIds, fSelectENEPEXRI, ENEPEXRI, 'eanl_id', AMndMasterIds.EanlIds);
+      ExportTabelle(AMndMasterIds.KndIds, fSelectENEAPO, ENEAPO, 'eanl_id', AMndMasterIds.EanlIds);
+      ExportTabelle(AMndMasterIds.KndIds, fSelectENENVP, ENENVP, 'eanl_id', AMndMasterIds.EanlIds);
+      ExportTabelle(AMndMasterIds.KndIds, fSelectENEANV, ENEANV, 'eanl_id', AMndMasterIds.EanlIds);
+      ExportTabelle(AMndMasterIds.KndIds, fSelectENEASSB, ENEASSB, 'eanl_id', AMndMasterIds.EanlIds);
+      ExportTabelle(AMndMasterIds.KndIds, fSelectENEANLSP, ENEANLSP, 'eanl_id', AMndMasterIds.EanlIds);
+      ExportTabelle(AMndMasterIds.KndIds, fSelectENEANLVEKWK, ENEANLVEKWK, 'eanl_id', AMndMasterIds.EanlIds);
+      ExportTabelle(AMndMasterIds.KndIds, fSelectENEANLVE, ENEANLVE, 'eanl_id', AMndMasterIds.EanlIds);
+      ExportTabelle(AMndMasterIds.KndIds, fSelectENVEEPEX, ENVEEPEX, 'eanl_id', AMndMasterIds.EanlIds);
+      ExportTabelle(AMndMasterIds.KndIds, fSelectENEAAW, ENEAAW, 'eanl_id', AMndMasterIds.EanlIds);
+      ExportTabelle(AMndMasterIds.KndIds, fSelectENEAEB, ENEAEB, 'eanl_id', AMndMasterIds.EanlIds);
+      ExportTabelle(AMndMasterIds.KndIds, fSelectENEAES, ENEAES, 'eanl_id', AMndMasterIds.EanlIds);
+      ExportTabelle(AMndMasterIds.KndIds, fSelectENEAET, ENEAET, 'eanl_id', AMndMasterIds.EanlIds);
+      ExportTabelle(AMndMasterIds.KndIds, fSelectENEATE, ENEATE, 'eanl_id', AMndMasterIds.EanlIds);
+      ExportTabelle(AMndMasterIds.KndIds, fSelectENEAVD, ENEAVD, 'eanl_id', AMndMasterIds.EanlIds);
+      ExportTabelle(AMndMasterIds.KndIds, fSelectENTMV, ENTMV, 'eanl_id', AMndMasterIds.EanlIds);
+      ExportTabelle(AMndMasterIds.KndIds, fSelectENEASEE, ENEASEE, 'eanl_id', AMndMasterIds.EanlIds);
+      ExportTabelle(AMndMasterIds.KndIds, fSelectENEASEEOBS, ENEASEEOBS, 'eanl_id', AMndMasterIds.EanlIds);
+
+      ExportTabelle(AMndMasterIds.KndIds, fSelectENERVZPEanl, ENERVZP, 'eanl_id', AMndMasterIds.EanlIds);
+      ExportTabelle(AMndMasterIds.KndIds, fSelectENERVZPZpt, ENERVZP, 'zpt_id', AMndMasterIds.ZptIds);
+      ExportTabelle(AMndMasterIds.KndIds, fSelectENERVA, ENERVA, 'eanl_id', AMndMasterIds.EanlIds);
+      ExportTabelle(AMndMasterIds.KndIds, fSelectENERVZT, ENERVZT, 'erv_id', TableIdMapping.Values[ENERV]);
+      ExportTabelle(AMndMasterIds.KndIds, fSelectENERV, ENERV, 'erv_id', TableIdMapping.Values[ENERV]);
+      ExportTabelle(AMndMasterIds.KndIds, fSelectENTRE, ENTRE, 'tre_id', TableIdMapping.Values[ENTRE]);
+
+      ExportTabelle(AMndMasterIds.KndIds, fSelectENEANLBV, ENEANLBV, 'eanl_id', AMndMasterIds.EanlIds);
+      ExportTabelle(AMndMasterIds.KndIds, fSelectENPAV, ENPAV, 'eanl_id', AMndMasterIds.EanlIds);
+    end;
+
+    if FExportOptionen.DoRechnungExport then
+    begin
+      if (FExportOptionen.StichtagVon <> NULL_DATE) then
+        DoProzessTabellen(AMndMasterIds.KndIds, False)
+      else
+        DoProzessTabellen(AMndMasterIds.KndIds, True);
+
+      ExportTabelle(AMndMasterIds.KndIds, fSelectENKFG, ENKFG, 'mnd_id', MndIds);
+    end;
+
+    SetStatus('Exportiere weitere Daten (MndId: ' + IntToStr(AMndMasterIds.MndId) + ' / KndIds: ' + AMndMasterIds.KndIds.GetUniqueCommaList + ', #2)');
+    ExportTabelle(AMndMasterIds.KndIds, fSelectCRGPVT, CRGPVT, 'gpvg_id', fGpvgIds);
+    ExportTabelle(AMndMasterIds.KndIds, fSelectENATN, ENATN, 'atn_id', TableIdMapping.Values[ENATN]);
+    ExportTabelle(AMndMasterIds.KndIds, fSelectENATZ, ENATZ, 'atn_id', TableIdMapping.Values[ENATN]);
+
+    // Artikel-IDs müssen nach VFAs (in DoProzessTabellen) exportiert werden
+    ExportTabelle(AMndMasterIds.KndIds, fSelectENMNN, ENMNN, 'mlk_id', AMndMasterIds.MlkIds);
+    ExportTabelle(AMndMasterIds.KndIds, fSelectENMNA, ENMNA, 'mnn_id', FMnnIds);
+    ExportTabelle(AMndMasterIds.KndIds, fSelectENART, ENART, 'art_id', FArtIds);
+    ExportTabelle(AMndMasterIds.KndIds, fSelectENGART, ENGART, 'gart_id', FGartIds);
+
+    // Zuerst VBE in SMTPT sammeln
+    ExportTabelle(AMndMasterIds.KndIds, fSelectENVBE_SMTP, ENVBE, 'smtp_id', TableIdMapping.Values[ENSMTP]);
+    // Und danach VBE exportieren
+    ExportTabelle(AMndMasterIds.KndIds, fSelectENVBE, ENVBE, 'vbe_id', TableIdMapping.Values[ENVBE]);
+
+    //In ENKNV wird VBA_NR gesammelt.
+    ExportTabelle(AMndMasterIds.KndIds, fSelectENVBA, ENVBA, 'vba_nr', fVbaNummern);
+    ExportTabelleWithString(AMndMasterIds.KndIds, fSelectENFLD, ENFLD, 'fld_name', fFldNamen);
+    ExportTabelleWithString(AMndMasterIds.KndIds, fSelectENOBSMeLo, ENOBS, 'obs_bezeichnung', fObsBezeichnungenMeLo);
+    ExportTabelleWithString(AMndMasterIds.KndIds, fSelectENOBSMaLo, ENOBS, 'obs_bezeichnung', fObsBezeichnungenMaLo);
+
+    SetStatus('Selektiere weitere Ids (MndId: ' + IntToStr(FExportMndId) + ' / KndIds: ' + AMndMasterIds.KndIds.GetUniqueCommaList + ')');
+    repeat
+      neueIdsSelektiert := false;
+      for i := 0 to FExportObjectManager.Count-1 do
+        if FExportObjectManager[i].PrepareSelectedIds(fConnection, self, FExportObjectManager) then
+          neueIdsSelektiert := true;
+
+       for i := 0 to FExportObjectManager.Count-1 do
+          if FExportObjectManager[i].SelectIds(fConnection, FExportObjectManager) then
+            neueIdsSelektiert := true;
+    until not neueIdsSelektiert;
+
+    SetStatus('Exportiere weitere Daten (MndId: ' + IntToStr(AMndMasterIds.MndId) + ' / KndIds: ' + AMndMasterIds.KndIds.GetUniqueCommaList + ', #3)');
+    for i := 0 to FExportObjectManager.Count-1 do
+      ExportTabelle(FExportObjectManager[i]);
+
+    SetStatus('Exportiere weitere Daten (MndId: ' + IntToStr(AMndMasterIds.MndId) + ' / KndIds: ' + AMndMasterIds.KndIds.GetUniqueCommaList + ', #4)');
+    ExportTabelleWithString(AMndMasterIds.KndIds, GetSelectENMPID(fSelectENMPID), ENMPID, 'mpid_nummer', FMpidNrList);
+    ExportTabelleWithString(AMndMasterIds.KndIds, fSelectENHZO, ENHZO, 'hzo_nr', FHzoNrList);
+
+    ExportTabelle(AMndMasterIds.KndIds, fSelectENABS, ENABS, 'knd_id', AMndMasterIds.KndIds);
+    ExportTabelle(AMndMasterIds.KndIds, fSelectENABT, ENABT, 'abs_id', TableIdMapping.Values[ENABS]);
+    // Prozesse aus PRDM
+    ExportTabelle(AMndMasterIds.KndIds, fSelectENPRZ, ENPRZ, 'prz_id', TableIdMapping.Values['ABT_PRZ']);
+
+    ExportTabelle(AMndMasterIds.KndIds, fSelectENABSR, ENABSR, 'knd_id', AMndMasterIds.KndIds);
+    ExportTabelle(AMndMasterIds.KndIds, fSelectENABSZ, ENABSZ, 'absr_id', TableIdMapping.Values[ENABSR]);
+    ExportTabelle(AMndMasterIds.KndIds, fSelectENVZR, ENVZR, 'knd_id', AMndMasterIds.KndIds);
+    ExportTabelle(AMndMasterIds.KndIds, fSelectENVZZ, ENVZZ, 'vzr_id', TableIdMapping.Values[ENVZR]);
+    ExportTabelle(AMndMasterIds.KndIds, fSelectENESA, ENESA, 'mes_id', AMndMasterIds.MesIds);
+    ExportTabelle(AMndMasterIds.KndIds, fSelectENEGA, ENEGA, 'mes_id', AMndMasterIds.MesIds);
+    ExportTabelle(AMndMasterIds.KndIds, fSelectENEWA, ENEWA, 'mes_id', AMndMasterIds.MesIds);
+    ExportTabelle(AMndMasterIds.KndIds, fSelectENESAM, ENESAM, 'esa_id', TableIdMapping.Values[ENESA]);
+    ExportTabelle(AMndMasterIds.KndIds, fSelectENEGAM, ENEGAM, 'ega_id', TableIdMapping.Values[ENEGA]);
+    ExportTabelle(AMndMasterIds.KndIds, fSelectENEWAM, ENEWAM, 'ewa_id', TableIdMapping.Values[ENEWA]);
+    ExportTabelle(AMndMasterIds.KndIds, fSelectENPRDU, ENPRDU, 'mes_id', AMndMasterIds.MesIds);
+    ExportTabelle(AMndMasterIds.KndIds, fSelectENPRDM, ENPRDM, 'prdu_id', TableIdMapping.Values[ENPRDU]);
+    ExportTabelle(AMndMasterIds.KndIds, fSelectENPRDT, ENPRDT, 'prdu_id', TableIdMapping.Values[ENPRDU]);
+    ExportTabelle(AMndMasterIds.KndIds, fSelectENTUA, ENTUA, 'tua_id', TableIdMapping.Values[ENTUA]);
+    // Prozesse aus PRDM
+    ExportTabelle(AMndMasterIds.KndIds, fSelectENPRZ, ENPRZ, 'prz_id', TableIdMapping.Values[ENPRZ]);
+//    ExportTabelle(AMndMasterIds.KndIds, fSelectCRRAB, CRRAB, 'rab_id', TableIdMapping.Values[CRRAB]);
+  finally
+    Qry.Free;
+    MndIds.Free;
+  end;
+end;
+
+
+procedure TKundenExport.FillTable(ATable: TTableObj; AQry: TSQLQuery);
+var
+  i: Integer;
+  id: TLongId;
+  column: TcolumnObj;
+  msg, value, addon: String;
+  expObj: TExpImpTableObj;
+begin
+  value := NULL_STRING;
+  if AQry.Eof then
+    exit;
+
+  expObj := FExportObjectManager.GetItemByIdentifier(ATable.Tablename);
+
+  for i := 0 to AQry.FieldList.Count - 1 do
+  begin
+    if AQry.Fields[i].IsNull then
+      Continue;
+
+    column := TcolumnObj.Create(AQry.FieldList.Fields[i].FieldName, AQry.FieldList.Fields[i].DataType, AQry.FieldList.Fields[i].DataSize);
+    value := TXmlUtils.ReplaceBackend2Xml(AQry.Fields[i].AsString, column.FieldType);
+    column.Value:= value;
+    ATable.Columns.Add(column);
+    FSdManager.AddUsedValue(FExportMndId, column.Columnname, column.FieldType, value);
+
+    if (ATable.Tablename = ENNWMN
+    ) then
+    begin
+      if (column.Columnname = 'NWMN_EMPFAENGER_TYP') then
+      begin
+        if (column.Value = IntToStr(NWMN_EMPFAENGER_TYP_LIEFERANT)) then
+        begin
+          FSdManager.AddUsedValue(FExportMndId, 'LIF_ID', ftLargeint, AQry.FieldByName('NWMN_EMPFAENGER_ID').AsString);
+        end
+        else if (column.Value = IntToStr(NWMN_EMPFAENGER_TYP_NETZBETREIBER)) then
+        begin
+          FSdManager.AddUsedValue(FExportMndId, 'NBT_ID', ftLargeint, AQry.FieldByName('NWMN_EMPFAENGER_ID').AsString);
+        end
+        else if (column.Value = IntToStr(NWMN_EMPFAENGER_TYP_MESSSTELLENBETREIBER)) then
+        begin
+          FSdManager.AddUsedValue(FExportMndId, 'MBT_ID', ftLargeint, AQry.FieldByName('NWMN_EMPFAENGER_ID').AsString);
+        end
+        else if (column.Value = IntToStr(NWMN_EMPFAENGER_TYP_UEBERTRAGUNGSNETZBETREIBER)) then
+        begin
+          //ENMPT wird aktuell weder exportiert noch importiert
+          FSdManager.AddUsedValue(FExportMndId, 'MPT_ID', ftLargeint, AQry.FieldByName('NWMN_EMPFAENGER_ID').AsString);
+        end;
+      end;
+    end;
+
+    if (ATable.Tablename = ENNWS) and (column.Columnname = 'NBT_ID_NEU') then
+      FSdManager.AddUsedValue(FExportMndId, 'NBT_ID', ftLargeint, value);
+
+    if expObj <> nil then
+       expObj.AnonymisiereFeldWert(column);
+
+    if AnsiEndsText('_SENDER_NAME', column.Columnname) then
+      value := AnonymisiereDaten(column, pdSenderName)
+    else
+    if AnsiEndsText('_SENDER_STRASSE', column.Columnname) then
+      value := AnonymisiereDaten(column, pdSenderStrasse)
+    else
+    if AnsiEndsText('_SENDER_ORT', column.Columnname) then
+      value := AnonymisiereDaten(column, pdSenderOrt)
+    else
+    if AnsiEndsText('_SENDER_PLZ', column.Columnname) then
+      value := AnonymisiereDaten(column, pdSenderPlz)
+    else
+    if AnsiEndsText('_SENDER_HAUSNR', column.Columnname) then
+      value := AnonymisiereDaten(column, pdSenderHausNr)
+    else
+    if AnsiEndsText('_EMPF_NAME', column.Columnname) then
+      value := AnonymisiereDaten(column, pdEmpfaengerName)
+    else
+    if AnsiEndsText('_EMPF_STRASSE', column.Columnname) then
+      value := AnonymisiereDaten(column, pdEmpfaengerStrasse)
+    else
+    if AnsiEndsText('_EMPF_ORT', column.Columnname) then
+      value := AnonymisiereDaten(column, pdEmpfaengerOrt)
+    else
+    if AnsiEndsText('_EMPF_PLZ', column.Columnname) then
+      value := AnonymisiereDaten(column, pdEmpfaengerPlz)
+    else
+    if AnsiEndsText('_EMPF_HAUSNR', column.Columnname) then
+      value := AnonymisiereDaten(column, pdEmpfaengerHausNr)
+    else
+    if (AnsiEndsText('_STRASSE', column.Columnname) or
+        AnsiEndsText('_SUCHF_STRASSE', column.Columnname) or
+        AnsiEndsText('_SUCHFELDSTRASSE', column.Columnname)) then
+      value := AnonymisiereDaten(column, pdStrasse)
+    else
+    if AnsiEndsText('_HAUSNR', column.Columnname) or
+       AnsiEndsText('SUCHF_HAUSNR', column.Columnname) then
+      value := AnonymisiereDaten(column, pdHausnr)
+    else
+    if AnsiEndsText('_PLZ', column.Columnname) or
+       AnsiEndsText('_SUCHF_PLZ', column.Columnname) then
+      value := AnonymisiereDaten(column, pdPlz)
+    else
+    if (AnsiEndsText('_ORT', column.Columnname) or
+        AnsiEndsText('_SUCHF_ORT', column.Columnname) or
+        AnsiEndsText('_SUCHFELDORT', column.Columnname)) then
+      value := AnonymisiereDaten(column, pdOrt)
+    else
+    if AnsiEndsText('_HAUSUNTERNR', column.Columnname) then
+      value := AnonymisiereDaten(column, pdHausUnterNr)
+    else
+    if (AnsiEndsText('_LS_NAME', column.Columnname) or
+        AnsiEndsText('_SUCHF_NAME', column.Columnname) or
+        AnsiEndsText('_KND_NAME', column.Columnname) or
+        AnsiEndsText('ANS_NAME', column.Columnname)) then
+      value := AnonymisiereDaten(column, pdName)
+    else
+    if (AnsiEndsText('_LS_VORNAME', column.Columnname) or
+        AnsiEndsText('_KND_VORNAME', column.Columnname) or
+        AnsiEndsText('_SUCHF_VORNAME', column.Columnname) or
+        AnsiEndsText('ANS_VORNAME', column.Columnname)) then
+      value := AnonymisiereDaten(column, pdVorname)
+    else
+    if AnsiEndsText('_ANSPRECHPARTNER', column.Columnname) then
+      value := AnonymisiereDaten(column, pdAnsprechpartner)
+    else
+    if AnsiEndsText('ASP_EMAIL', column.Columnname) then
+      value := AnonymisiereDaten(column, pdAnsprechpartnerEmail)
+    else
+    if AnsiEndsText('_EMAIL', column.Columnname) then
+      value := AnonymisiereDaten(column, pdMail)
+    else
+    if AnsiEndsText('_TELEFON', column.Columnname) then
+      value := AnonymisiereDaten(column, pdTelNr)
+    else
+    if ('EPR_BEZEICHNUNG' =  column.Columnname) then
+      value := QuotedStr('EPR_BEZEICHNUNG ' + IntToStr( ConnectionPool.GetSequenceValue(SEQ_ENCOMMON)));
+
+    // NBT_NR wird für die Auflösung verwendet, wenn das als QuotedStr gespeichert wird,
+    // kommt in SQL = AND NBT_NR = '''200001'''
+    if (column.Columnname = 'NBT_NR') then
+    begin
+      value := EntferneHochkomma(value);
+    end;
+    column.Value:= value;
+
+    if (ATable.Tablename = ENKND) then
+    begin
+      if (column.Columnname = 'KND_KUNDENINFO') then
+        column.Value:= 'NULL'
+      else if (column.Columnname = 'KND_STEUERNUMMER') then
+        column.Value:= 'NULL'
+    end
+    else if (ATable.Tablename = ENKZB) then
+    begin
+      if (column.Columnname = 'KZB_KONTAKTMIT') then
+        column.Value:= QuotedStr('IMPORT')
+    end
+    else if (ATable.Tablename = ENKZE) then
+    begin
+      if (column.Columnname = 'KZE_KONTAKTMIT') then
+        column.Value:= QuotedStr('IMPORT')
+    end;
+
+    if (ATable.Tablename = ENKNV) and (column.Columnname = 'NBT_NR') then
+      FSdManager.AddUsedNbtNr(FExportMndId, value, FieldAsInteger(AQry.FieldByName('KNV_ENERGIEART')));
+
+    if (column.Columnname = 'RO_ID') then
+      FGpAdrInfoManager.RegisterExportRoId(column.Value);
+    if (column.Columnname = 'ABN_ID') then
+      FGpAdrInfoManager.RegisterExportAbnId(column.Value);
+
+    if (column.Columnname = 'MND_ID') And FexportOptionen.IsExportXmlDebug then
+    begin
+      if expObj <> nil then
+      begin
+        id := AQry.FieldByName(expObj.IdFieldName).AsLongId;
+        addon := CR_LF + expObj.IdFieldName + ': ' + id.ToStr + CR_LF + expObj.IdDebugInfo[id];
+      end
+       else
+      addon := '';
+
+      if (ATable.ExportMndId <> AQry.FieldList.Fields[i].AsString) then
+      begin
+        msg := '1: Abweichender Mandant (1): ' + ATable.Tablename + ' MndIdIst: ' + AQry.FieldList.Fields[i].AsString + ' <-> MndIdSoll ' + ATable.ExportMndId + addon;
+        if DebugHook > 0 then
+          ShowErrorDialog(msg);
+        AddToExportLog(msg);
+      end;
+
+      if (FExportMndId <> AQry.FieldList.Fields[i].AsInteger) then
+      begin
+        msg := '2: Abweichender Mandan (2): ' + ATable.Tablename + ' MndIdIst: ' + AQry.FieldList.Fields[i].AsString + ' <-> MndIdSoll ' + IntToStr(FExportMndId) + addon;
+        if DebugHook > 0 then
+          ShowErrorDialog(msg);
+        AddToExportLog(msg);
+      end;
+    end;
+
+   if (AQry.FieldList.Fields[i].FieldName = 'ZSTEP_LISTE') then
+     LoadZstepListe(AQry, ATable);
+  end;
+end;
+
+function TKundenExport.AddIdToList(AListe: TelSimpleLongIdList; AId: TLongId): Boolean;
+begin
+  Result := True;
+  if AId.IsNull then
+  begin
+    Result := False;
+    exit;
+  end;
+
+  if (not AListe.Contains(AId)) then
+  begin
+    AListe.Add(AId);
+    Result := False;
+  end;
+end;
+
+function TKundenExport.AddStringToList(AListe: TStringList; AValue: String): Boolean;
+begin
+  Result := True;
+  if (AListe.IndexOf(AValue) = -1) then
+  begin
+    AListe.Add(AValue);
+    Result := False;
+  end;
+end;
+
+procedure TKundenExport.AddToExportLog(AMsg: String);
+begin
+  if FExportLog.IndexOf(AMsg) < 0 then
+    FExportLog.Add(AMsg);
+end;
+
+procedure TKundenExport.AddToMprdList(AMpidNummer: String);
+begin
+ if (FMpidNrList.IndexOf(AMpidNummer) = -1) then
+     FMpidNrList.Add(AMpidNummer);
+end;
+
+function TKundenExport.CheckObSchonExportiert(ATableName: String; Qry: TSQLQuery; AMndKndIdListe: TelSimpleLongIdList): Boolean;
+var
+  i: Integer;
+  expObj: TExpImpTableObj;
+begin
+  Result := False;
+  for I := 0 to FExportObjectManager.Count - 1 do
+  begin
+    expObj := FExportObjectManager[i];
+    if expObj.CheckObSchonExportiert(ATableName, Qry, AMndKndIdListe) then
+      result := true;
+  end;
+
+  if (ATableName = ENZPG) then
+  begin
+    AddIdToList(FZaeIds, Qry.FieldByName('ZAE_ID').AsLongId);
+    AddIdToList(FGerpIds, Qry.FieldByName('GERP_ID').AsLongId);
+    AddIdToList(FZpgIds, Qry.FieldByName('ZPG_ID').AsLongId);
+    result := AddIdToList(FZpgIdsExportiert, Qry.FieldByName('ZPG_ID').AsLongId);
+    AddEexIdsByFkLinkId(Qry.FieldByName('ZPG_ID').AsLongId, EEX_FKTYP_ENZPG);
+  end
+   else
+  if ATableName = ENSMA then
+  begin
+    AddIdToList(FZpgIds, Qry.FieldByName('ZPG_ID_SMGW').AsLongId);
+    AddIdToList(FZpgIds, Qry.FieldByName('ZPG_ID_MME').AsLongId);
+    AddIdToIdMapping(ENSMTP, Qry.FieldByName('SMTP_ID'));
+  end
+   else
+  if (ATableName = ENGTW) then
+  begin
+    AddIdToList(FGtwIds, Qry.FieldByName('GTW_ID').AsLongId);
+    AddIdToList(FGtaIds, Qry.FieldByName('GTA_ID').AsLongId);
+    AddEexIdsByFkLinkId(Qry.FieldByName('GTA_ID').AsLongId, EEX_FKTYP_ENGTA);
+    result := AddIdToList(FGtwIdsExportiert, Qry.FieldByName('GTW_ID').AsLongId);
+  end
+   else
+  if (ATableName = ENZPTTR) then
+  begin
+    Result := AddIdToList(FZpttrIds, Qry.FieldByName('ZPTTR_ID').AsLongId);
+    AddEexIdsByFkLinkId(Qry.FieldByName('ZPT_ID_MALO').AsLongId, EEX_FKTYP_ENZPT);
+    AddEexIdsByFkLinkId(Qry.FieldByName('ZPT_ID_TRANCHE').AsLongId, EEX_FKTYP_ENZPT);
+  end
+   else
+  if (ATableName = fENZPTTREANL) then
+  begin
+    Result := AddIdToList(FZpttrEanlIds, Qry.FieldByName('ZPTTREANL_ID').AsLongId);
+  end
+  else
+  if (ATableName = ENZAE) then
+  begin
+    Result := AddIdToList(fZaeIdsExportiert, Qry.FieldByName('ZAE_ID').AsLongId);
+    AddIdToList(FZaeIds, Qry.FieldByName('ZAE_ID').AsLongId);
+  end
+  else
+  if (ATableName = ENZAP) then
+  begin
+    AddIdToIdMapping(ENSMTP, Qry.FieldByName('SMTP_ID'));
+  end
+  else
+  if (ATableName = ENEANL) then
+  begin
+    Result := AddIdToList(FEanlIdsExportiert, Qry.FieldByName('EANL_ID').AsLongId);
+    if FEanlIdsExportiert.Count > 0 then
+      FEckdaten.ExportEsmMnd := FExportMndId;
+  end
+   else
+  if (ATableName = ENEAPW) then
+  begin
+    Result := AddIdToList(fEAPWIds, Qry.FieldByName('EAPW_ID').AsLongId);
+    if (not Qry.FieldByName('BIG_ID').IsNull) then
+      AddIdToList(FBigIds, Qry.FieldByName('BIG_ID').AsLongId);
+    if (not Qry.FieldByName('LPR_ID').IsNull) then
+      AddIdToList(FLprIds, Qry.FieldByName('LPR_ID').AsLongId);
+  end
+   else
+  if (ATableName = ENKND) then
+  begin
+    Result := AddIdToList(FKndIdsExportiert, Qry.FieldByName('KND_ID').AsLongId);
+    CheckAndLogKndIdExport(Qry.FieldByName('KND_ID').AsLongId, 'ENKND.KND_ID', AMndKndIdListe);
+    AddEexIdsByFkLinkId(Qry.FieldByName('KND_ID').AsLongId, EEX_FKTYP_ENKND);
+  end
+   else
+  if (ATableName = ENEANB) then
+  begin
+    Result := AddIdToList(FEanbIds, Qry.FieldByName('EANB_ID').AsLongId);
+    CheckAndLogKndIdExport(Qry.FieldByName('KND_ID').AsLongId, 'ENEANB.KND_ID', AMndKndIdListe);
+  end
+   else
+  if (ATableName = ENBIG) then
+  begin
+    Result := AddIdToList(FBigIds, Qry.FieldByName('BIG_ID').AsLongId);
+    if (not Qry.FieldByName('RGZ_ID').IsNull) then
+      AddIdToList(FRgzIds, Qry.FieldByName('RGZ_ID').AsLongId);
+  end
+   else
+  if (ATableName = ENZPN) then
+  begin
+    if (not Qry.FieldByName('NET_ID').IsNull) then
+      AddIdToList(FNetIds, Qry.FieldByName('NET_ID').AsLongId);
+  end
+   else
+  if (ATableName = ENZMB) then
+  begin
+    if (not Qry.FieldByName('MBT_ID').IsNull) then
+      AddIdToList(FMbtIds, Qry.FieldByName('MBT_ID').AsLongId);
+    if (not Qry.FieldByName('MBT_ID_MALO_ABW').IsNull) then
+      AddIdToList(FMbtIds, Qry.FieldByName('MBT_ID_MALO_ABW').AsLongId);
+  end
+   else
+  if (ATableName = ENLPR) then
+  begin
+    Result := AddIdToList(FLprIds, Qry.FieldByName('LPR_ID').AsLongId);
+    if (not Qry.FieldByName('NBT_ID').IsNull) then
+      AddIdToList(FNbtIds, Qry.FieldByName('NBT_ID').AsLongId);
+  end
+   else
+  if (ATableName = ENNNB) then
+  begin
+    if (not Qry.FieldByName('NBT_ID').IsNull) then
+      AddIdToList(FNbtIds, Qry.FieldByName('NBT_ID').AsLongId);
+  end
+   else
+  if (ATableName = ENZPB) then
+  begin
+    Result := AddIdToList(FZpbIds, Qry.FieldByName('ZPB_ID').AsLongId);
+    if (not Qry.FieldByName('BIK_ID').IsNull) then
+      AddIdToList(FBikIds, Qry.FieldByName('BIK_ID').AsLongId);
+  end
+   else
+  if (ATableName = ENZPBD) then
+  begin
+    Result := AddIdToList(FZpbdIds, Qry.FieldByName('ZPBD_ID').AsLongId);
+    if (not Qry.FieldByName('ZRT_ID').IsNull) then
+      AddIdToList(FZrtIds, Qry.FieldByName('ZRT_ID').AsLongId);
+    if (not Qry.FieldByName('ZRT_ID_TLP').IsNull) then
+      AddIdToList(FZrtIds, Qry.FieldByName('ZRT_ID_TLP').AsLongId);
+    if (not Qry.FieldByName('LPR_ID').IsNull) then
+      AddIdToList(FLprIds, Qry.FieldByName('LPR_ID').AsLongId);
+    if (not Qry.FieldByName('LPR_ID_TLP').IsNull) then
+      AddIdToList(FLprIds, Qry.FieldByName('LPR_ID_TLP').AsLongId);
+    if (not Qry.FieldByName('BIG_ID').IsNull) then
+      AddIdToList(FBigIds, Qry.FieldByName('BIG_ID').AsLongId);
+  end
+   else
+  if (ATableName = ENEAVS) then
+  begin
+    if (not Qry.FieldByName('LIF_ID').IsNull) then
+      AddIdToList(FLifIds, Qry.FieldByName('LIF_ID').AsLongId);
+  end
+   else
+  if (ATableName = ENMES) then
+  begin
+    AddEexIdsByFkLinkId(Qry.FieldByName('MES_ID').AsLongId, EEX_FKTYP_ENMES);
+    if (not Qry.FieldByName('LIF_ID').IsNull) then
+      AddIdToList(FLifIds, Qry.FieldByName('LIF_ID').AsLongId);
+    if (not Qry.FieldByName('KND_ID').IsNull) then
+      CheckAndLogKndIdExport(Qry.FieldByName('KND_ID').AsLongId, 'ENMES.KND_ID', AMndKndIdListe);
+    AddEexIdsByFkLinkId(Qry.FieldByName('ZPT_ID').AsLongId, EEX_FKTYP_ENZPT);
+  end
+   else
+  if (ATableName = ENLIF) then
+  begin
+    Result := AddIdToList(FLifIds, Qry.FieldByName('LIF_ID').AsLongId);
+    if (not Qry.FieldByName('KND_ID').IsNull) then
+      CheckAndLogKndIdExport(Qry.FieldByName('KND_ID').AsLongId, 'ENLIF.KND_ID', AMndKndIdListe);
+  end;
+
+  if (ATableName = ENZPT) then
+  begin
+    Result := AddIdToList(FZptIdsExportiert, Qry.FieldByName('ZPT_ID').AsLongId);
+    AddStringToList(fMeteringcodes, Qry.FieldByName('ZPT_METERINGCODE').AsString);
+    AddIdToList(FZpkIds, Qry.FieldByName('ZPK_ID').AsLongId);
+  end;
+
+  if (ATableName = ENABN) then
+  begin
+    Result := AddIdToList(FAbnIdsExportiert, Qry.FieldByName('ABN_ID').AsLongId);
+    AddEexIdsByFkLinkId(Qry.FieldByName('ABN_ID').AsLongId, EEX_FKTYP_ENABN);
+  end;
+
+  if (ATableName = ENZPK) then
+  begin
+    Result := AddIdToList(FZpkIdsExportiert, Qry.FieldByName('ZPK_ID').AsLongId);
+  end;
+
+  if (ATableName = ENGERP) then
+    Result := AddIdToList(FGerpIdsExportiert, Qry.FieldByName('GERP_ID').AsLongId);
+
+  if (ATableName = ENGBZ) then
+  begin
+    Result := AddIdToList(FGbzIds, Qry.FieldByName('GBZ_ID').AsLongId);
+    AddIdToList(FZpgIds, Qry.FieldByName('ZPG_ID_MASTER').AsLongId);
+    AddIdToList(FZpgIds, Qry.FieldByName('ZPG_ID_SLAVE').AsLongId);
+
+    if (not Qry.FieldByName('GBZD_ID').IsNull) then
+      AddIdToList(TableIdMapping.Values[ENGBZD], Qry.FieldByName('GBZD_ID').AsLongId);
+  end;
+
+  if (ATableName = ENERVZP) then
+  begin
+    AddIdToList(TableIdMapping.Values[ENERV], Qry.FieldByName('ERV_ID').AsLongId);
+    Result := AddIdToList(TableIdMapping.Values[ENERVZP], Qry.FieldByName('ERVZP_ID').AsLongId);
+  end
+  else
+  if (ATableName = ENERVA) then
+  begin
+    AddIdToList(TableIdMapping.Values[ENERV], Qry.FieldByName('ERV_ID').AsLongId);
+    Result := AddIdToList(TableIdMapping.Values[ENERVA], Qry.FieldByName('ERVA_ID').AsLongId);
+  end
+  else
+  if (ATableName = ENERVZT) then
+  begin
+    Result := AddIdToList(TableIdMapping.Values[ENERVZT], Qry.FieldByName('ERVZT_ID').AsLongId);
+  end
+  else
+  if (ATableName = ENERV) then
+  begin
+    // Es muss die andere Liste geprüft werden, sonst liefert die Prüfung TRUE für bereits
+    // gesammelte ERV_IDs
+    Result := AddIdToList(TableIdMapping.Values[ENERV+'EXP'], Qry.FieldByName('ERV_ID').AsLongId);
+  end
+  else
+  if (ATableName = ENTRE) then
+  begin
+    Result := AddIdToList(TableIdMapping.Values[ENTRE], Qry.FieldByName('TRE_ID').AsLongId);
+  end
+  else
+  if (ATableName = ENEASEE) then
+  begin
+    AddIdToList(TableIdMapping.Values[ENTRE], Qry.FieldByName('TRE_ID').AsLongId);
+  end;
+
+  if (ATableName = ENZPTH) then
+    Result := AddIdToList(fZPTHIds, Qry.FieldByName('ZPTH_ID').AsLongId);
+
+  if ((ATableName = ENPRZ) or (ATableName = ENSPZ)) then
+  begin
+    Result := AddIdToList(FBereitsExportiertePrzIds, Qry.FieldByName('PRZ_ID').AsLongId);
+  end;
+
+  if (ATableName = ENLSCH) then
+  begin
+    Result := AddIdToList(fLschIds, Qry.FieldByName('LSCH_ID').AsLongId);
+    FExportObjectManager.GetItemByIdentifier(EDMSC).SelectIdForExport(Qry.FieldByName('MSC_ID').AsLongId, ATableName + ', ' + Qry.FieldByName('LSCH_ID').AsString);
+    if FExportOptionen.DoEexExport then
+      FExportObjectManager.GetItemByIdentifier(CREPZ).SelectIdForExport(Qry.FieldByName('EPZ_ID').AsLongId, ATableName + ', ' + Qry.FieldByName('LSCH_ID').AsString);
+
+    if (not Qry.FieldByName('PRZ_IDSTORNO').IsNull) then
+    begin
+      AddIdToList(fLschPrzIdStornos, Qry.FieldByName('PRZ_IDSTORNO').AsLongId);
+    end;
+  end;
+
+  if (ATableName = ENLSMW) then
+  begin
+    Result := AddIdToList(FLsmwIds, Qry.FieldByName('LSMW_ID').AsLongId);
+  end;
+
+  if (ATableName = ENLSMH) then
+  begin
+    Result := AddIdToList(FLsmhIds, Qry.FieldByName('LSMH_ID').AsLongId);
+  end;
+
+  if ((ATableName = ENKNV) or (ATableName = ENKNVA) or (ATableName = ENMVA) or (ATableName = ENFVB)) then
+  begin
+    AddIdToList(fVbaNummern, Qry.FieldByName('VBA_NR').AsLongId);
+    if ((ATableName = ENKNV) and
+        (not Qry.FieldByName('NBT_NR').IsNull) and
+        (FNbtNrAusKnvList.IndexOf(Qry.FieldByName('NBT_NR').AsString) = -1)) then
+    begin
+      CheckNbtIdZuNbtNr(Qry.FieldByName('MND_ID').AsString, Qry.FieldByName('NBT_NR').AsString);
+    end;
+  end;
+
+  if (ATableName = ENZPZ) then
+  begin
+    AddStringToList(fObsBezeichnungenMeLo, Qry.FieldByName('ZPZ_OBISCODE').AsString);
+  end;
+
+  if (ATableName = ENZPO) then
+  begin
+    AddIdToIdMapping(ENVBE, Qry.FieldByName('VBE_ID'));
+
+    if (Qry.FieldByName('ZPO_VERWENDUNG').AsString = '1') then
+      AddStringToList(fObsBezeichnungenMeLo, Qry.FieldByName('ZPO_OBISCODE').AsString)
+    else if (Qry.FieldByName('ZPO_VERWENDUNG').AsString = '2') then
+      AddStringToList(fObsBezeichnungenMaLo, Qry.FieldByName('ZPO_OBISCODE').AsString);
+  end;
+
+  if (ATableName = ENZPOE) then
+  begin
+    FExportObjectManager.GetItemByIdentifier(EDMSC).SelectIdForExport(Qry.FieldByName('MSC_ID').AsLongId, ATableName + ', ' + Qry.FieldByName('ZPOE_ID').AsString);
+    Result := AddIdToList(FZpoeIds, Qry.FieldByName('ZPOE_ID').AsLongId);
+  end;
+
+  if (ATableName = ENVBA) then
+  begin
+    AddIdToList(fVbaNummern, Qry.FieldByName('VBA_NR').AsLongId);
+  end;
+
+  if (ATableName = ENKVE) then
+  begin
+    AddIdToList(fVerIds, Qry.FieldByName('VER_ID').AsLongId);
+  end;
+
+  if (ATableName = ENNWS) then
+  begin
+    if (not Qry.FieldByName('NBT_ID_NEU').IsNull) then
+      AddIdToList(FNbtIds, Qry.FieldByName('NBT_ID_NEU').AsLongId);
+  end;
+
+  if (ATableName = ENNWMN) then
+  begin
+    if (not Qry.FieldByName('NWMN_EMPFAENGER_ID').IsNull) and (Qry.FieldByName('NWMN_EMPFAENGER_TYP').Value = NWMN_EMPFAENGER_TYP_LIEFERANT) then
+      AddIdToList(FLifIds, Qry.FieldByName('NWMN_EMPFAENGER_ID').AsLongId)
+    else
+    if (not Qry.FieldByName('NWMN_EMPFAENGER_ID').IsNull) and (Qry.FieldByName('NWMN_EMPFAENGER_TYP').Value = NWMN_EMPFAENGER_TYP_NETZBETREIBER) then
+      AddIdToList(FNbtIds, Qry.FieldByName('NWMN_EMPFAENGER_ID').AsLongId)
+    else
+    if (not Qry.FieldByName('NWMN_EMPFAENGER_ID').IsNull) and (Qry.FieldByName('NWMN_EMPFAENGER_TYP').Value = NWMN_EMPFAENGER_TYP_MESSSTELLENBETREIBER) then
+      AddIdToList(FMbtIds, Qry.FieldByName('NWMN_EMPFAENGER_ID').AsLongId)
+    else
+    if (not Qry.FieldByName('NWMN_EMPFAENGER_ID').IsNull) and (Qry.FieldByName('NWMN_EMPFAENGER_TYP').Value = NWMN_EMPFAENGER_TYP_UEBERTRAGUNGSNETZBETREIBER) then
+     // AddIdToList(FMptIds, Qry.FieldByName('NWMN_EMPFAENGER_ID').AsLongId)
+     //wird aktuell wederimportierrt noch exportiert
+  end;
+
+
+  if (ATableName = ENVER) then
+  begin
+    AddIdToList(fVetNummern, Qry.FieldByName('VET_NR').AsLongId);
+  end;
+
+  if ((ATableName = ENVFA) or (ATableName = ENVFAA) or (ATableName = ENVFAI)) then
+  begin
+    AddStringToList(fFldNamen, Qry.FieldByName('FLD_NAME').AsString);
+//    if (not Qry.FieldByName('RAB_ID').IsNull) then
+//      AddIdToList(TableIdMapping.Values[CRRAB], Qry.FieldByName('RAB_ID').AsLongId);
+
+    if ((ATableName = ENVFA) or (ATableName = ENVFAA)) then
+    begin
+      if (not Qry.FieldByName('ART_ID').IsNull) then
+        AddIdToList(FArtIds, Qry.FieldByName('ART_ID').AsLongId);
+
+      if (not Qry.FieldByName('GART_ID').IsNull) then
+        AddIdToList(FGartIds, Qry.FieldByName('GART_ID').AsLongId);
+    end;
+  end;
+
+  if (ATableName = ENZLF) then
+  begin
+    if (not Qry.FieldByName('LIF_ID').IsNull) then
+      AddIdToList(FLifIds, Qry.FieldByName('LIF_ID').AsLongId);
+  end;
+
+  if (ATableName = CRGPVG) then
+  begin
+    AddIdToList(fGpvgIds, Qry.FieldByName('GPVG_ID').AsLongId);
+  end;
+
+  if (ATableName = ENZTH) then
+  begin
+    AddStringToList(FHzoNrList, Qry.FieldByName('HZO_NR').AsString);
+  end
+  else if (ATableName = ENASTZ) then
+  begin
+    AddIdToList(FAstpIds, Qry.FieldByName('ASTP_ID').AsLongId);
+  end
+  else if (ATableName = ENAAUF) then
+  begin
+    Result := AddIdToList(FAaufIds, Qry.FieldByName('AAUF_ID').AsLongId);
+    AddIdToIdMapping(ENSMTP, Qry.FieldByName('SMTP_ID'));
+  end
+  else if (ATableName = ENAAFE) then
+  begin
+    Result := AddIdToList(FAafeIds, Qry.FieldByName('AAFE_ID').AsLongId);
+  end
+  else if (ATableName = ENAAUI) then
+  begin
+    Result := AddIdToList(FAauiIds, Qry.FieldByName('AAUI_ID').AsLongId);
+  end
+  else if (ATableName = ENAAUS) then
+  begin
+    Result := AddIdToList(FAausIds, Qry.FieldByName('AAUS_ID').AsLongId);
+  end
+  else if (ATableName = ENAAUB) then
+  begin
+    Result := AddIdToList(FAaubIds, Qry.FieldByName('AAUB_ID').AsLongId);
+
+    if (not Qry.FieldByName('PRZ_ID').IsNull) then
+      AddIdToList(FAprPrzIds, Qry.FieldByName('PRZ_ID').AsLongId);
+    if (not Qry.FieldByName('AKA_ID').IsNull) then
+      AddIdToList(FAkaIds, Qry.FieldByName('AKA_ID').AsLongId);
+  end
+  else if (ATableName = ENAKA) then
+  begin
+    Result := AddIdToList(FAkaIdsExportiert, Qry.FieldByName('AKA_ID').AsLongId);
+
+    if (not Qry.FieldByName('TUA_ID').IsNull) then
+      AddIdToList(TableIdMapping.Values[ENTUA], Qry.FieldByName('TUA_ID').AsLongId);
+  end
+  else if (ATableName = ENAPR) then
+  begin
+    Result := AddIdToList(FAprPrzIdsExportiert, Qry.FieldByName('PRZ_ID').AsLongId);
+  end
+  else if (ATableName = ENABM) then
+  begin
+    Result := AddIdToList(FAbmIds, Qry.FieldByName('ABM_ID').AsLongId);
+  end
+  else if (ATableName = ENABK) then
+  begin
+    Result := AddIdToList(FAbkIds, Qry.FieldByName('ABK_ID').AsLongId);
+  end
+  else if (ATableName = ENABZ) then
+  begin
+    Result := AddIdToList(FAbzIds, Qry.FieldByName('ABZ_ID').AsLongId);
+  end
+  else if (ATableName = ENABW) then
+  begin
+    Result := AddIdToList(FAbwIds, Qry.FieldByName('ABW_ID').AsLongId);
+  end
+  else if (ATableName = ENAAUW) then
+  begin
+    Result := AddIdToList(FAauwIds, Qry.FieldByName('AAUW_ID').AsLongId);
+  end
+  else if (ATableName = ENAZZU) then
+  begin
+    Result := AddIdToList(FAzzuIds, Qry.FieldByName('AZZU_ID').AsLongId);
+  end
+  else if (ATableName = ENZSTE) then
+  begin
+    Result := AddIdToList(FZsteIds, Qry.FieldByName('ZSTE_ID').AsLongId);
+    if (not Qry.FieldByName('NBT_ID').IsNull) then
+      AddIdToList(FNbtIds, Qry.FieldByName('NBT_ID').AsLongId);
+  end
+  else if (ATableName = ENZSEF) then
+  begin
+    Result := AddIdToList(FZsefIds, Qry.FieldByName('ZSEF_ID').AsLongId);
+  end
+  else if (ATableName = ENZSEI) then
+  begin
+    Result := AddIdToList(FZseiIds, Qry.FieldByName('ZSEI_ID').AsLongId);
+  end
+  else if (ATableName = ENZPS) then
+  begin
+    if (not Qry.FieldByName('ZMWE_ID_BEGINN').IsNull) then
+      AddIdToList(FZmweIds, Qry.FieldByName('ZMWE_ID_BEGINN').AsLongId);
+    if (not Qry.FieldByName('ZMWE_ID_ENDE').IsNull) then
+      AddIdToList(FZmweIds, Qry.FieldByName('ZMWE_ID_ENDE').AsLongId);
+  end
+  else if (ATableName = ENZMWE) then
+  begin
+    Result := AddIdToList(FZmweIdsExportiert, Qry.FieldByName('ZMWE_ID').AsLongId);
+  end
+  else if (ATableName = ENZMWZ) then
+  begin
+    Result := AddIdToList(FZmwzIds, Qry.FieldByName('ZMWZ_ID').AsLongId);
+  end
+  else if (ATableName = ENZSTEP) then
+  begin
+    Result := AddIdToList(FZstepIds, Qry.FieldByName('ZSTEP_ID').AsLongId);
+  end
+  else if (ATableName = ENAMMR) then
+  begin
+    Result := AddIdToList(FAmmrIds, Qry.FieldByName('AMMR_ID').AsLongId);
+  end
+  else if (ATableName = ENMWMEMA) then
+  begin
+    Result := AddIdToList(FMwmemaIds, Qry.FieldByName('MWMEMA_ID').AsLongId);
+  end
+  else if (ATableName = ENZPTEM) then
+  begin
+    Result := AddIdToList(FZptemIds, Qry.FieldByName('ZPTEM_ID').AsLongId);
+  end
+  else if (ATableName = ENMNN) then
+  begin
+    Result := AddIdToList(FMnnIds, Qry.FieldByName('MNN_ID').AsLongId);
+  end
+  else if (ATableName = ENMNA) then
+  begin
+    Result := AddIdToList(FMnaIds, Qry.FieldByName('MNA_ID').AsLongId);
+    if (not Qry.FieldByName('ART_ID').IsNull) then
+      AddIdToList(FArtIds, Qry.FieldByName('ART_ID').AsLongId);
+    if (not Qry.FieldByName('GART_ID').IsNull) then
+      AddIdToList(FGartIds, Qry.FieldByName('GART_ID').AsLongId);
+  end
+  else if (ATableName = ENART) then
+  begin
+    Result := AddIdToList(TableIdMapping.Values[ART_EXP_CHECK], Qry.FieldByName('ART_ID').AsLongId);
+    if (not Qry.FieldByName('NBT_ID').IsNull) then
+      AddIdToList(FNbtIds, Qry.FieldByName('NBT_ID').AsLongId);
+  end
+  else if (ATableName = ENGART) then
+  begin
+    Result := AddIdToList(TableIdMapping.Values[GART_EXP_CHECK], Qry.FieldByName('GART_ID').AsLongId);
+  end
+  else if (ATableName = CRGPVT) then
+  begin
+    Result := AddIdToList(TableIdMapping.Values[CRGPVT], Qry.FieldByName('GPVT_ID').AsLongId);
+
+    if (not Qry.FieldByName('ATN_ID').IsNull) then
+      AddIdToList(TableIdMapping.Values[ENATN], Qry.FieldByName('ATN_ID').AsLongId);
+  end
+  else if (ATableName = ENVBE) then
+  begin
+    Result := AddIdToIdMapping(ENVBE, Qry.FieldByName('VBE_ID'));
+  end
+  else if (ATableName = ENABS) then
+  begin
+    Result := AddIdToList(TableIdMapping.Values[ENABS], Qry.FieldByName('ABS_ID').AsLongId);
+  end
+  else if (ATableName = ENABT) then
+  begin
+    AddIdToList(TableIdMapping.Values['ABT_PRZ'], Qry.FieldByName('PRZ_ID').AsLongId);
+  end
+  else if (ATableName = ENABSR) then
+  begin
+    Result := AddIdToIdMapping(ENABSR, Qry.FieldByName('ABSR_ID'));
+  end
+  else if (ATableName = ENABSZ) then
+  begin
+    Result := AddIdToIdMapping(ENABSZ, Qry.FieldByName('ABSZ_ID'));
+  end
+  else if (ATableName = ENVZR) then
+  begin
+    Result := AddIdToIdMapping(ENVZR, Qry.FieldByName('VZR_ID'));
+  end
+  else if (ATableName = ENVZZ) then
+  begin
+    Result := AddIdToIdMapping(ENVZZ, Qry.FieldByName('VZZ_ID'));
+  end
+  else if (ATableName = ENESA) then
+  begin
+    Result := AddIdToIdMapping(ENESA, Qry.FieldByName('ESA_ID'));
+  end
+  else if (ATableName = ENEGA) then
+  begin
+    Result := AddIdToIdMapping(ENEGA, Qry.FieldByName('EGA_ID'));
+  end
+  else if (ATableName = ENEWA) then
+  begin
+    Result := AddIdToIdMapping(ENEWA, Qry.FieldByName('EWA_ID'));
+  end
+  else if (ATableName = ENESAM) then
+  begin
+    Result := AddIdToIdMapping(ENESAM, Qry.FieldByName('ESAM_ID'));
+  end
+  else if (ATableName = ENEGAM) then
+  begin
+    Result := AddIdToIdMapping(ENEGAM, Qry.FieldByName('EGAM_ID'));
+  end
+  else if (ATableName = ENEWAM) then
+  begin
+    Result := AddIdToIdMapping(ENEWAM, Qry.FieldByName('EWAM_ID'));
+  end
+  else if (ATableName = ENPRDU) then
+  begin
+    Result := AddIdToIdMapping(ENPRDU, Qry.FieldByName('PRDU_ID'));
+  end
+  else if (ATableName = ENPRDM) then
+  begin
+    Result := AddIdToIdMapping(ENPRDM, Qry.FieldByName('PRDM_ID'));
+  end
+  else if (ATableName = ENPRDT) then
+  begin
+    Result := AddIdToIdMapping(ENPRDT, Qry.FieldByName('PRDT_ID'));
+  end;
+//  else if (ATableName = CRRABG) then
+//  begin
+//    AddIdToList(TableIdMapping.Values[CRRAB], Qry.FieldByName('RAB_ID').AsLongId);
+//  end;
+end;
+
+function TKundenExport.FillChildrenWithPreparedQuery(Qry: TSQLQuery; ATableName: String;
+   aIdValueList: TDictionary<String, TLongId>;
+   AMndKndIdListe: TelSimpleLongIdList): Integer;
+var
+  Child: TTableObj;
+  i: Integer;
+  value: TLongId;
+begin
+  CheckIsCanceled;
+  result := 0;
+  Qry.Close;
+  if (Qry.Params.Count > 0) then
+  begin
+    for i := 0 to Qry.Params.Count - 1 do
+    begin
+      if (aIdValueList.TryGetValue(Qry.Params[i].Name, value)) then
+      begin
+        setDBParam(Qry.Params[i], value);
+      end;
+    end;
+  end;
+
+  Qry.Open;
+  while not Qry.Eof do
+  begin
+    CheckIsCanceled;
+    if (CheckObSchonExportiert(ATableName, Qry, AMndKndIdListe)) then
+    begin
+      Qry.Next;
+      continue;
+    end;
+    result := result + 1;
+    Child := TTableObj.Create;
+    child.ExportMndId := IntToStr(FExportMndId);
+    child.Tablename := ATableName;
+    try
+      FillTable(Child, Qry);
+      WriteChildTable(Child);
+    finally
+      Child.Free;
+    end;
+    Qry.Next;
+  end;
+end;
+
+function TKundenExport.FillChildrenWithPreparedQueryWithString(Qry: TSQLQuery; ATableName: String;
+  aKeyValueList: TDictionary<String, String>; AMndKndIdListe: TelSimpleLongIdList): Integer;
+var
+  Child: TTableObj;
+  i: Integer;
+  value: String;
+begin
+  result := 0;
+  Qry.Close;
+  if (Qry.Params.Count > 0) then
+  begin
+    for i := 0 to Qry.Params.Count - 1 do
+    begin
+      if (aKeyValueList.TryGetValue(Qry.Params[i].Name, value)) then
+      begin
+        setDBParam(Qry.Params[i], value);
+      end;
+    end;
+  end;
+
+  Qry.Open;
+  while not Qry.Eof do
+  begin
+    if (CheckObSchonExportiert(ATableName, Qry, AMndKndIdListe)) then
+    begin
+      Qry.Next;
+      continue;
+    end;
+    result := result + 1;
+    Child := TTableObj.Create;
+    child.ExportMndId := IntToStr(FExportMndId);
+    child.Tablename := ATableName;
+    FillTable(Child, Qry);
+    WriteChildTable(Child);
+    Child.Free;
+    Qry.Next;
+  end;
+end;
+
+procedure TKundenExport.DoProzessTabellen(AMndKndIdListe: TelSimpleLongIdList;
+   ANurLieferscheinProzesse: Boolean);
+var
+  przQuery, lieferscheinPrzQry: TSQLQuery;
+  przId, przIdStorno, przIdAbschlagStorno: TLongId;
+  przIdList, przIdStornoList, przIdAbschlagStornoList, przIdList2, kndIdList: TelSimpleLongIdList;
+  i, j: Integer;
+begin
+  przIdList := TelSimpleLongIdList.Create;
+  przIdList2 := TelSimpleLongIdList.Create;
+  kndIdList := TelSimpleLongIdList.Create;
+  przIdStornoList := TelSimpleLongIdList.Create;
+  przIdAbschlagStornoList := TelSimpleLongIdList.Create;
+  przQuery := fConnection.CreateSQLQuery;
+  lieferscheinPrzQry := fConnection.CreateSQLQuery;
+  try
+    przQuery.SQL.Add('SELECT DISTINCT');
+    przQuery.SQL.Add('prz.prz_id');
+    przQuery.SQL.Add(', vfm.knd_id');
+    przQuery.SQL.Add(', rpr.prz_idstorno');
+    przQuery.SQL.Add(', prz.prz_absstornoprz_id');
+    przQuery.SQL.Add('FROM ' + ENPRZ + ' prz');
+    przQuery.SQL.Add('JOIN ' + ENVFM + ' vfm ON vfm.prz_id = prz.prz_id');
+    przQuery.SQL.Add('LEFT JOIN ' + ENRPR + ' rpr ON rpr.prz_id = prz.prz_id');
+    przQuery.SQL.Add('  AND rpr.knd_id = vfm.knd_id');
+    przQuery.SQL.Add('WHERE');
+    przQuery.SQL.Add('prz.prz_id <> 0');
+    przQuery.SQL.Add('AND NVL(prz.prz_proforma, 0) = 0');
+    przQuery.SQL.Add('AND vfm_belegdatum >= ' + dtmLib32SystemZeit.getDatabaseDateString(FExportOptionen.StichtagVon));
+    if (FExportOptionen.StichtagBis <> NULL_DATE) then
+      przQuery.SQL.Add('AND vfm_belegdatum <= ' + dtmLib32SystemZeit.getDatabaseDateString(FExportOptionen.StichtagBis));
+    przQuery.SQL.Add('AND vfm.knd_id = :knd_id');
+    przQuery.Prepared := True;
+
+    lieferscheinPrzQry.SQL.Clear;
+    lieferscheinPrzQry.SQL.Add('SELECT DISTINCT');
+    lieferscheinPrzQry.SQL.Add('prz.prz_id');
+    lieferscheinPrzQry.SQL.Add(', rpr.prz_idstorno');
+    lieferscheinPrzQry.SQL.Add(', prz.prz_absstornoprz_id');
+    lieferscheinPrzQry.SQL.Add('FROM ' + ENPRZ + ' prz');
+    lieferscheinPrzQry.SQL.Add('JOIN ' + ENRPR + ' rpr ON rpr.prz_id = prz.prz_id');
+    lieferscheinPrzQry.SQL.Add('WHERE 1 = 1');
+    lieferscheinPrzQry.SQL.Add('AND prz.prz_id <> 0');
+    lieferscheinPrzQry.SQL.Add('AND rpr.knd_id = :knd_id');
+    lieferscheinPrzQry.Prepared := True;
+
+    for i := 0 to AMndKndIdListe.Count - 1 do
+    begin
+      przIdList.Clear;
+      if (not ANurLieferscheinProzesse) then
+      begin
+        SetDBParam(przQuery.ParamByName('knd_id'), AMndKndIdListe.Items[i]);
+        SetStatus('Exportiere Rechnungsdaten (MndId: ' + IntToStr(FExportMndId) + ' / KndId: ' + AMndKndIdListe.Items[i].ToStr + ')');
+        przQuery.Open;
+        while (not przQuery.Eof) do
+        begin
+          przId := przQuery.FieldByName('prz_id').AsLongId;
+          przIdStorno := przQuery.FieldByName('prz_idstorno').AsLongId;
+          przIdAbschlagStorno := przQuery.FieldByName('prz_absstornoprz_id').AsLongId;
+
+          if (not przIdList.Contains(przId)) and not przId.IsNull then
+            przIdList.Add(przId);
+
+          if not przIdStorno.IsNull then
+          begin
+            if (not przIdStornoList.Contains(przIdStorno)) then
+              przIdStornoList.Add(przIdStorno);
+          end;
+
+          if przIdAbschlagStorno.IsNull then
+          begin
+            if (not przIdAbschlagStornoList.Contains(przIdAbschlagStorno)) then
+              przIdAbschlagStornoList.Add(przIdAbschlagStorno);
+          end;
+          przQuery.Next;
+        end;
+        przQuery.Close;
+      end;
+
+      SetDBParam(lieferscheinPrzQry.ParamByName('knd_id'), AMndKndIdListe.Items[i]);
+      lieferscheinPrzQry.Open;
+      while (not lieferscheinPrzQry.Eof) do
+      begin
+        przId := lieferscheinPrzQry.FieldByName('prz_id').AsLongId;
+        przIdStorno := lieferscheinPrzQry.FieldByName('prz_idstorno').AsLongId;
+        przIdAbschlagStorno := lieferscheinPrzQry.FieldByName('prz_absstornoprz_id').AsLongId;
+        if (not przIdList.Contains(przId)) and not przId.IsNull then
+          przIdList.Add(przId);
+
+        if not przIdStorno.IsNull then
+        begin
+          if (not przIdStornoList.Contains(przIdStorno)) then
+            przIdStornoList.Add(przIdStorno);
+        end;
+
+        if not przIdAbschlagStorno.IsNull then
+        begin
+          if (not przIdAbschlagStornoList.Contains(przIdAbschlagStorno)) then
+            przIdAbschlagStornoList.Add(przIdAbschlagStorno);
+        end;
+        lieferscheinPrzQry.Next;
+      end;
+      lieferscheinPrzQry.Close;
+
+      kndIdList.Clear;
+      kndIdList.Add(AMndKndIdListe.Items[i]);
+
+      for j := 0 to przIdAbschlagStornoList.Count - 1 do
+      begin
+        przIdList2.Clear;
+        przIdList2.Add(przIdAbschlagStornoList.Items[j]);
+        ExportTabelle(AMndKndIdListe, fSelectENPRZ,  ENPRZ, 'prz_id', przIdList2, 'knd_id', kndIdList);
+        ExportTabelle(AMndKndIdListe, fSelectENSPZ,  ENSPZ, 'prz_id', przIdList2, 'knd_id', kndIdList);
+        ExportTabelle(AMndKndIdListe, fSelectENRPR,  ENRPR, 'prz_id', przIdList2, 'knd_id', kndIdList);
+        ExportTabelle(AMndKndIdListe, fSelectENFDEF, ENFDEF, 'prz_id', przIdList2, 'knd_id', kndIdList);
+        ExportTabelle(AMndKndIdListe, fSelectENFSU,  ENFSU, 'prz_id', przIdList2, 'knd_id', kndIdList);
+        ExportTabelle(AMndKndIdListe, fSelectENFVB,  ENFVB, 'prz_id', przIdList2, 'knd_id', kndIdList);
+        ExportTabelle(AMndKndIdListe, fSelectENKNV,  ENKNV, 'prz_id', przIdList2, 'knd_id', kndIdList);
+        ExportTabelle(AMndKndIdListe, fSelectENMLR,  ENMLR, 'prz_id', przIdList2, 'knd_id', kndIdList);
+        ExportTabelle(AMndKndIdListe, fSelectENVFI,  ENVFI, 'prz_id', przIdList2, 'knd_id', kndIdList);
+        ExportTabelle(AMndKndIdListe, fSelectENVKZ,  ENVKZ, 'prz_id', przIdList2, 'knd_id', kndIdList);
+        ExportTabelle(AMndKndIdListe, fSelectENVFM,  ENVFM, 'prz_id', przIdList2, 'knd_id', kndIdList);
+        ExportTabelle(AMndKndIdListe, fSelectENVFS,  ENVFS, 'prz_id', przIdList2, 'knd_id', kndIdList);
+        ExportTabelle(AMndKndIdListe, fSelectENVFA,  ENVFA, 'prz_id', przIdList2, 'knd_id', kndIdList);
+        ExportTabelle(AMndKndIdListe, fSelectENVFAI, ENVFAI, 'prz_id', przIdList2, 'knd_id', kndIdList);
+        ExportTabelle(AMndKndIdListe, fSelectENVFME, ENVFME, 'prz_id', przIdList2, 'knd_id', kndIdList);
+        ExportTabelle(AMndKndIdListe, fSelectENGBT,  ENGBT, 'prz_id', przIdList2, 'knd_id', kndIdList);
+        ExportTabelle(AMndKndIdListe, fSelectENKNVA, ENKNVA, 'prz_id', przIdList2, 'knd_id', kndIdList);
+        ExportTabelle(AMndKndIdListe, fSelectENVFAA, ENVFAA, 'prz_id', przIdList2, 'knd_id', kndIdList);
+        ExportTabelle(AMndKndIdListe, fSelectCRABRPG, CRABRPG, 'prz_id', przIdList2, 'knd_id', kndIdList);
+        ExportTabelle(AMndKndIdListe, fSelectCRRABG, CRRABG, 'prz_id', przIdList2, 'knd_id', kndIdList);
+      end;
+
+      for j := 0 to przIdStornoList.Count - 1 do
+      begin
+        przIdList2.Clear;
+        przIdList2.Add(przIdStornoList.Items[j]);
+        ExportTabelle(AMndKndIdListe, fSelectENPRZ,  ENPRZ, 'prz_id', przIdList2, 'knd_id', kndIdList);
+        ExportTabelle(AMndKndIdListe, fSelectENSPZ,  ENSPZ, 'prz_id', przIdList2, 'knd_id', kndIdList);
+        ExportTabelle(AMndKndIdListe, fSelectENRPR,  ENRPR, 'prz_id', przIdList2, 'knd_id', kndIdList);
+        ExportTabelle(AMndKndIdListe, fSelectENFDEF, ENFDEF, 'prz_id', przIdList2, 'knd_id', kndIdList);
+        ExportTabelle(AMndKndIdListe, fSelectENFSU,  ENFSU, 'prz_id', przIdList2, 'knd_id', kndIdList);
+        ExportTabelle(AMndKndIdListe, fSelectENFVB,  ENFVB, 'prz_id', przIdList2, 'knd_id', kndIdList);
+        ExportTabelle(AMndKndIdListe, fSelectENKNV,  ENKNV, 'prz_id', przIdList2, 'knd_id', kndIdList);
+        ExportTabelle(AMndKndIdListe, fSelectENMLR,  ENMLR, 'prz_id', przIdList2, 'knd_id', kndIdList);
+        ExportTabelle(AMndKndIdListe, fSelectENVFI,  ENVFI, 'prz_id', przIdList2, 'knd_id', kndIdList);
+        ExportTabelle(AMndKndIdListe, fSelectENVKZ,  ENVKZ, 'prz_id', przIdList2, 'knd_id', kndIdList);
+        ExportTabelle(AMndKndIdListe, fSelectENVFM,  ENVFM, 'prz_id', przIdList2, 'knd_id', kndIdList);
+        ExportTabelle(AMndKndIdListe, fSelectENVFS,  ENVFS, 'prz_id', przIdList2, 'knd_id', kndIdList);
+        ExportTabelle(AMndKndIdListe, fSelectENVFA,  ENVFA, 'prz_id', przIdList2, 'knd_id', kndIdList);
+        ExportTabelle(AMndKndIdListe, fSelectENVFAI, ENVFAI, 'prz_id', przIdList2, 'knd_id', kndIdList);
+        ExportTabelle(AMndKndIdListe, fSelectENVFME, ENVFME, 'prz_id', przIdList2, 'knd_id', kndIdList);
+        ExportTabelle(AMndKndIdListe, fSelectENGBT,  ENGBT, 'prz_id', przIdList2, 'knd_id', kndIdList);
+        ExportTabelle(AMndKndIdListe, fSelectENKNVA, ENKNVA, 'prz_id', przIdList2, 'knd_id', kndIdList);
+        ExportTabelle(AMndKndIdListe, fSelectENVFAA, ENVFAA, 'prz_id', przIdList2, 'knd_id', kndIdList);
+        ExportTabelle(AMndKndIdListe, fSelectCRABRPG, CRABRPG, 'prz_id', przIdList2, 'knd_id', kndIdList);
+        ExportTabelle(AMndKndIdListe, fSelectCRRABG, CRRABG, 'prz_id', przIdList2, 'knd_id', kndIdList);
+      end;
+
+      for j := 0 to przIdList.Count - 1 do
+      begin
+        przIdList2.Clear;
+        przIdList2.Add(przIdList.Items[j]);
+        ExportTabelle(AMndKndIdListe, fSelectENPRZ,  ENPRZ, 'prz_id', przIdList2, 'knd_id', kndIdList);
+        ExportTabelle(AMndKndIdListe, fSelectENSPZ,  ENSPZ, 'prz_id', przIdList2, 'knd_id', kndIdList);
+        ExportTabelle(AMndKndIdListe, fSelectENRPR,  ENRPR, 'prz_id', przIdList2, 'knd_id', kndIdList);
+        ExportTabelle(AMndKndIdListe, fSelectENFDEF, ENFDEF, 'prz_id', przIdList2, 'knd_id', kndIdList);
+        ExportTabelle(AMndKndIdListe, fSelectENFSU,  ENFSU, 'prz_id', przIdList2, 'knd_id', kndIdList);
+        ExportTabelle(AMndKndIdListe, fSelectENFVB,  ENFVB, 'prz_id', przIdList2, 'knd_id', kndIdList);
+        ExportTabelle(AMndKndIdListe, fSelectENKNV,  ENKNV, 'prz_id', przIdList2, 'knd_id', kndIdList);
+        ExportTabelle(AMndKndIdListe, fSelectENMLR,  ENMLR, 'prz_id', przIdList2, 'knd_id', kndIdList);
+        ExportTabelle(AMndKndIdListe, fSelectENVFI,  ENVFI, 'prz_id', przIdList2, 'knd_id', kndIdList);
+        ExportTabelle(AMndKndIdListe, fSelectENVKZ,  ENVKZ, 'prz_id', przIdList2, 'knd_id', kndIdList);
+        ExportTabelle(AMndKndIdListe, fSelectENVFM,  ENVFM, 'prz_id', przIdList2, 'knd_id', kndIdList);
+        ExportTabelle(AMndKndIdListe, fSelectENVFS,  ENVFS, 'prz_id', przIdList2, 'knd_id', kndIdList);
+        ExportTabelle(AMndKndIdListe, fSelectENVFA,  ENVFA, 'prz_id', przIdList2, 'knd_id', kndIdList);
+        ExportTabelle(AMndKndIdListe, fSelectENVFAI, ENVFAI, 'prz_id', przIdList2, 'knd_id', kndIdList);
+        ExportTabelle(AMndKndIdListe, fSelectENVFME, ENVFME, 'prz_id', przIdList2, 'knd_id', kndIdList);
+        ExportTabelle(AMndKndIdListe, fSelectENGBT,  ENGBT, 'prz_id', przIdList2, 'knd_id', kndIdList);
+        ExportTabelle(AMndKndIdListe, fSelectENKNVA, ENKNVA, 'prz_id', przIdList2, 'knd_id', kndIdList);
+        ExportTabelle(AMndKndIdListe, fSelectENVFAA, ENVFAA, 'prz_id', przIdList2, 'knd_id', kndIdList);
+        ExportTabelle(AMndKndIdListe, fSelectCRABRPG, CRABRPG, 'prz_id', przIdList2, 'knd_id', kndIdList);
+        ExportTabelle(AMndKndIdListe, fSelectCRRABG, CRRABG, 'prz_id', przIdList2, 'knd_id', kndIdList);
+      end;
+
+      if przIdList.Count > 0 then
+      begin
+         if (FEckdaten.ExportMitRechnungsdaten.IndexOf(IntToStr(FExportMndId))<0) then
+            FEckdaten.ExportMitRechnungsdaten.Add(IntToStr(FExportMndId));
+      end;
+
+    end;
+  finally
+    przQuery.Free;
+    lieferscheinPrzQry.Free;
+    przIdList.Free;
+    przIdList2.Free;
+    kndIdList.Free;
+    przIdStornoList.Free;
+    przIdAbschlagStornoList.Free;
+  end;
+end;
+
+function TKundenExport.ExportTabelle(AMndKndIdListe: TelSimpleLongIdList; select: String; tablename: String; idFeldname1: String;
+  idListe1: TelSimpleLongIdList; idFeldname2: String = ''; idListe2: TelSimpleLongIdList = nil): Integer;
+var
+  i: Integer;
+  keyValueList: TDictionary<String, TLongId>;
+begin
+  CheckIsCanceled;
+  SetAddonStatus(tablename);
+  result := 0;
+  keyValueList := TDictionary<String, TLongId>.Create;
+  try
+    qryUltimate.SQL.Clear;
+    qryUltimate.SQL.Add(select);
+    qryUltimate.DBPrepare;
+    for i := 0 to idListe1.Count - 1 do
+    begin
+      CheckIsCanceled;
+      keyValueList.Clear;
+      keyValueList.Add(idFeldname1, idListe1.items[i]);
+      if (idFeldname2 <> '') then
+      begin
+        keyValueList.Add(idFeldname2, idListe2.items[i]);
+      end;
+      result := result +
+         FillChildrenWithPreparedQuery(qryUltimate, tablename, keyValueList, AMndKndIdListe);
+    end;
+  finally
+    keyValueList.Free;
+  end;
+end;
+
+procedure TKundenExport.ExportTabelle(AExportObj: TExpImpTableObj);
+var
+  Child: TTableObj;
+  qry: TSQLQuery;
+  sql, baseSql: String;
+  ids: TelSimpleLongIdList;
+begin
+  if AExportObj.IdsSelektiert.Count = 0 then
+    exit;
+  if not AExportObj.CanDoExport then
+    exit;
+
+  SetAddonStatus(AExportObj.TableName + ' (' + IntToStr(AExportObj.IdsSelektiert.Count) + ' Dts)');
+  qry := fConnection.CreateSQLQuery;
+  ids := TelSimpleLongIdList.Create(AExportObj.IdsSelektiert.Count);
+  try
+    ids.AddRange(AExportObj.IdsSelektiert);
+    baseSql := 'SELECT * ' + CR_LF +
+           ' FROM ' + AExportObj.TableName + CR_LF +
+           ' WHERE ' + AExportObj.DefaultFieldName + ' ' + BASISIDLISTTAG;
+    sql :=  GetSqlMitIds(baseSql, ids);
+    while sql <> '' do
+    begin
+      qry.SQL.Text := sql;
+      qry.Open();
+      while not qry.Eof do
+      begin
+        Child := TTableObj.Create;
+        child.ExportMndId := IntToStr(FExportMndId);
+        child.Tablename := AExportObj.TableName;
+        try
+          FillTable(Child, Qry);
+          WriteChildTable(Child);
+        finally
+          Child.Free;
+        end;
+        qry.Next;
+      end;
+      sql :=  GetSqlMitIds(baseSql, ids);
+    end;
+  finally
+    qry.Free;
+    ids.Free;
+  end;
+end;
+
+function TKundenExport.ExportTabelleWithString(AMndKndIdListe: TelSimpleLongIdList; select: String; tablename: String; feldname1: String;
+  liste1: TStringList; feldname2: String = ''; liste2: TStringList = nil): Integer;
+var
+  i: Integer;
+  keyValueList: TDictionary<String, String>;
+begin
+  CheckIsCanceled;
+  SetAddonStatus(tablename);
+  result := 0;
+  keyValueList := TDictionary<String, String>.Create;
+  try
+    qryUltimate.SQL.Clear;
+    qryUltimate.SQL.Add(select);
+    for i := 0 to liste1.Count - 1 do
+    begin
+      keyValueList.Clear;
+      keyValueList.Add(feldname1, liste1.Strings[i]);
+      if (feldname2 <> '') then
+      begin
+        keyValueList.Add(feldname2, liste2.Strings[i]);
+      end;
+      result := result +
+        FillChildrenWithPreparedQueryWithString(qryUltimate, tablename, keyValueList, AMndKndIdListe);
+    end;
+  finally
+    keyValueList.Free;
+  end;
+end;
+
+procedure TKundenExport.FuelleKndIdListe(AMndKndIdListe: TelSimpleLongIdList);
+
+var qryMesId,
+    qryAbnIds,
+    qryMesIdKnd,
+    qryEanlIdKnd,
+    qryEavKndId,
+    qryEagt,
+    qryKzeNextKnd,
+    qryKndNextPrev,
+    qryZpttr,
+    qryZpth,
+    qryTreByZptId,
+    qryTreByMlkId,
+    qryZptIdByTreId,
+    qryMlkByTreId,
+    qryLokByZptId,
+    qryLokByMlkId,
+    qryLokByTreId,
+    qryLok,
+    qryZmlkByMlkId,
+    qryZmlkByZptId: TSQLQuery;
+
+
+  function GetMasterIds(AMndId: Integer): TExportMndMasterIds;
+  begin
+    result := FMndMasterIds.Values[AMndId];
+    if result = nil then
+    begin
+      Result := TExportMndMasterIds.Create(AMndId);
+      FMndMasterIds.AddObject(AMndId, Result);
+    end;
+  end;
+
+  function SelectKndIdsByZptIds(AMasterIds: TExportMndMasterIds): Boolean;
+  var i: Integer;
+  begin
+    result := false;
+    for i := 0 to AMasterIds.ZptIds.Count - 1 do
+    begin
+      qryMesIdKnd.ParamByName('ZPT_ID').AsLongId := AMasterIds.ZptIds[i];
+      qryMesIdKnd.open;
+      try
+        while not qryMesIdKnd.Eof do
+        begin
+          if AMasterIds.AddKndId(qryMesIdKnd.Fields[0].AsLongId, 'qryMesIdKnd.Fields[0], ZptId = ' + AMasterIds.ZptIds[i].ToStr) then
+            result := true;
+
+          if AMasterIds.AddMesId(qryMesIdKnd.Fields[1].AsLongId, 'qryMesIdKnd.Fields[1], ZptId = ' + AMasterIds.ZptIds[i].ToStr) then
+            result := true;
+
+          qryMesIdKnd.Next;
+        end;
+      finally
+        qryMesIdKnd.Close;
+      end;
+    end;
+
+    if IsESMAktiv(AMasterIds.MndId) then
+    begin
+      for i := 0 to AMasterIds.ZptIds.Count - 1 do
+      begin
+        qryEanlIdKnd.ParamByName('ZPT_ID').AsLongId := AMasterIds.ZptIds[i];
+        qryEanlIdKnd.open;
+        try
+          while not qryMesIdKnd.Eof do
+          begin
+            if AMasterIds.AddKndId(qryEanlIdKnd.Fields[0].AsLongId, 'qryEanlIdKnd.Fields[0], ZptId = ' + AMasterIds.ZptIds[i].ToStr) then
+              result := true;
+
+            if AMasterIds.AddEanlId(qryEanlIdKnd.Fields[1].AsLongId, 'qryEanlIdKnd.Fields[1], ZptId = ' + AMasterIds.ZptIds[i].ToStr) then
+              result := true;
+
+            qryEanlIdKnd.Next;
+          end;
+        finally
+          qryEanlIdKnd.Close;
+        end;
+      end;
+
+      for i := 0 to AMasterIds.KndIds.Count - 1 do
+      begin
+        qryEavKndId.ParamByName('KND_ID').AsLongId := AMasterIds.KndIds[i];
+        qryEavKndId.open;
+        try
+          while not qryEavKndId.Eof do
+          begin
+            if AMasterIds.AddZptId(qryEavKndId.Fields[0].AsLongId, 'qryEavKndId.Fields[0], KndId = ' + AMasterIds.KndIds[i].ToStr) then
+              result := true;
+
+            if AMasterIds.AddEanlId(qryEavKndId.Fields[1].AsLongId, 'qryEavKndId.Fields[1], KndId = ' + AMasterIds.KndIds[i].ToStr) then
+              result := true;
+
+            if AMasterIds.AddMesId(qryEavKndId.Fields[2].AsLongId, 'qryEavKndId.Fields[2], KndId = ' + AMasterIds.KndIds[i].ToStr) then
+              result := true;
+
+            qryEavKndId.Next;
+          end;
+        finally
+          qryEavKndId.Close;
+        end;
+      end;
+
+      for i := 0 to AMasterIds.KndIds.Count - 1 do
+      begin
+        qryEagt.ParamByName('KND_ID').AsLongId := AMasterIds.KndIds[i];
+        qryEagt.open;
+        try
+          while not qryEagt.Eof do
+          begin
+            if AMasterIds.AddKndId(qryEagt.Fields[0].AsLongId, 'qryEagt.Fields[0], KndId = ' + AMasterIds.KndIds[i].ToStr) then
+              result := true;
+
+            if AMasterIds.AddEanlId(qryEagt.Fields[1].AsLongId, 'qryEagt.Fields[1], KndId = ' + AMasterIds.KndIds[i].ToStr) then
+              result := true;
+
+            qryEagt.Next;
+          end;
+        finally
+          qryEagt.Close;
+        end;
+      end;
+    end;
+  end;
+
+  function SelectKndIdsByKzeUndKndFieldss(AMasterIds: TExportMndMasterIds): Boolean;
+  var i: Integer;
+  begin
+    result := false;
+    for i := 0 to AMasterIds.KndIds.Count - 1 do
+    begin
+      qryKndNextPrev.ParamByName('KND_ID').AsLongId := AMasterIds.KndIds[i];
+      qryKndNextPrev.open;
+      try
+        while not qryKndNextPrev.Eof do
+        begin
+          if AMasterIds.AddKndId(qryKndNextPrev.Fields[0].AsLongId, 'qryKndNextPrev.Fields[0], KndId = ' + AMasterIds.KndIds[i].ToStr) then
+            result := true;
+
+          if AMasterIds.AddKndId(qryKndNextPrev.Fields[1].AsLongId, 'qryKndNextPrev.Fields[1], KndId = ' + AMasterIds.KndIds[i].ToStr) then
+            result := true;
+
+          qryKndNextPrev.Next;
+        end;
+      finally
+        qryKndNextPrev.Close;
+      end;
+    end;
+
+    if FExportObjectManager.ObjENKZE.DoInitialSelectByKndIds(fConnection, AMasterIds.MndId, AMasterIds.KndIds) > 0 then
+    begin
+      for i := 0 to AMasterIds.KndIds.Count - 1 do
+      begin
+        qryKzeNextKnd.ParamByName('KND_ID').AsLongId := AMasterIds.KndIds[i];
+        qryKzeNextKnd.open;
+        try
+          while not qryKndNextPrev.Eof do
+          begin
+            if AMasterIds.AddKndId(qryKzeNextKnd.Fields[0].AsLongId, 'qryKzeNextKnd.Fields[0], KndId = ' + AMasterIds.KndIds[i].ToStr) then
+              result := true;
+
+            qryKzeNextKnd.Next;
+          end;
+        finally
+          qryKzeNextKnd.Close;
+        end;
+      end;
+    end;
+  end;
+
+  function SelectZptIds(AMasterIds: TExportMndMasterIds; AMaloCodes: TStrings): Boolean;
+  var i: Integer;
+  begin
+    result := false;
+    for i := 0 to AMasterIds.KndIds.Count - 1 do
+    begin
+      qryMesId.ParamByName('KND_ID') .AsLongId:= AMasterIds.KndIds[i];
+      qryMesId.open;
+      try
+        while not qryMesId.Eof do
+        begin
+          if AMasterIds.AddZptId(qryMesId.Fields[0].AsLongId, 'qryMesId.Fields[0], KndId = ' + AMasterIds.KndIds[i].ToStr) then // ZptId
+            result := true;
+
+          if AMasterIds.AddZptId(qryMesId.Fields[1].AsLongId, 'qryMesId.Fields[1], KndId = ' + AMasterIds.KndIds[i].ToStr) then // MasterZptId
+            result := true;
+
+          if AMasterIds.AddZptId(qryMesId.Fields[2].AsLongId, 'qryMesId.Fields[2], KndId = ' + AMasterIds.KndIds[i].ToStr) then // MasterZptId2
+            result := true;
+
+          if AMasterIds.AddAbnId(qryMesId.Fields[3].AsLongId, 'qryMesId.Fields[3], KndId = ' + AMasterIds.KndIds[i].ToStr) then
+            result := true;
+
+          if AMasterIds.AddMesId(qryMesId.Fields[4].AsLongId, 'qryMesId.Fields[4], KndId = ' + AMasterIds.KndIds[i].ToStr) then // Mes-MasterMes
+            result := true;
+
+          qryMesId.Next;
+        end;
+      finally
+        qryMesId.Close;
+      end;
+    end;
+
+    if AMasterIds.HasNewZptIdsSinceLastReset then
+    begin
+      // Weitere vom Zpt ahbänige andere Zpts selektieren!
+      for i := 0 to AMasterIds.ZptIds.Count - 1 do
+      begin
+        qryZpth.Params[0].AsLongId := AMasterIds.ZptIds[i];
+        qryZpth.open;
+        try
+          while not qryZpth.Eof do
+          begin
+            if AMasterIds.AddZptId(qryZpth.Fields[0].AsLongId, 'qryZpth.Fields[0], ZptId = ' + AMasterIds.ZptIds[i].ToStr) then
+              result := true;
+
+            if AMasterIds.AddZptId(qryZpth.Fields[1].AsLongId, 'qryZpth.Fields[1], ZptId = ' + AMasterIds.ZptIds[i].ToStr) then
+              result := true;
+            qryZpth.Next;
+          end;
+        finally
+          qryZpth.Close;
+        end;
+      end;
+    end;
+
+    // Über Zpttr selektieren
+    if AMasterIds.HasNewZptIdsSinceLastReset then
+    begin
+      for i := 0 to AMasterIds.ZptIds.Count - 1 do
+      begin
+        qryZpttr.Params[0].AsLongId := AMasterIds.ZptIds[i];
+        qryZpttr.open;
+        try
+          while not qryZpttr.Eof do
+          begin
+            if AMasterIds.AddZptId(qryZpttr.Fields[0].AsLongId, 'qryZpttr.Fields[0], ZptId = ' + AMasterIds.ZptIds[i].ToStr) then
+              result := true;
+
+            if AMasterIds.AddZptId(qryZpttr.Fields[1].AsLongId, 'qryZpttr.Fields[1], ZptId = ' + AMasterIds.ZptIds[i].ToStr) then
+              result := true;
+
+            qryZpttr.Next;
+          end;
+        finally
+          qryZpttr.Close;
+        end;
+      end;
+    end;
+
+    // TreIds selektieren
+    if AMasterIds.HasNewZptIdsSinceLastReset then
+    begin
+      for i := AMasterIds.LastZptIdsCount to AMasterIds.ZptIds.Count - 1 do
+      begin
+        qryTreByZptId.Params[0].AsLongId := AMasterIds.ZptIds[i];
+        qryTreByZptId.open;
+        try
+          while not qryTreByZptId.Eof do
+          begin
+            if AMasterIds.AddTreId(qryTreByZptId.Fields[0].AsLongId, 'qryTreByZptId.Fields[0], ZptId = ' + AMasterIds.ZptIds[i].ToStr) then
+              result := true;
+
+            if AMasterIds.AddAbnId(qryTreByZptId.Fields[1].AsLongId, 'qryTreByZptId.Fields[1], ZptId = ' + AMasterIds.ZptIds[i].ToStr) then
+              result := true;
+
+            qryTreByZptId.Next;
+          end;
+        finally
+          qryTreByZptId.Close;
+        end;
+      end;
+    end;
+
+    // MlkIds selektieren
+    for i := 0 to AMasterIds.ZptIds.Count - 1 do
+    begin
+      qryZmlkByZptId.Params[0].AsLongId := AMasterIds.ZptIds[i];
+      qryZmlkByZptId.open;
+      try
+        while not qryZmlkByZptId.Eof do
+        begin
+          if AMasterIds.AddMlkId(qryZmlkByZptId.Fields[0].AsLongId, 'qryZmlkByZptId.Fields[0], ZptId = ' + AMasterIds.ZptIds[i].ToStr) then
+          begin
+            result := true;
+            if AMaloCodes.IndexOf(qryZmlkByZptId.Fields[1].AsString) <0 then
+              AMaloCodes.Add(qryZmlkByZptId.Fields[1].AsString);
+
+            qryZmlkByMlkId.Params[0].AsLongId := qryZmlkByZptId.Fields[0].AsLongId;
+            try
+              qryZmlkByMlkId.Open();
+              while not qryZmlkByMlkId.Eof do
+              begin
+                if AMasterIds.AddZptId(qryZmlkByMlkId.Fields[0].AsLongId, 'qryZmlkByMlkId.Fields[0], MlkId = ' + qryZmlkByZptId.Fields[0].AsLongId.ToStr) then
+                  result := true;
+                qryZmlkByMlkId.Next;
+              end;
+            finally
+              qryZmlkByMlkId.close;
+            end;
+          end;
+          qryZmlkByZptId.Next;
+        end;
+      finally
+        qryZmlkByZptId.Close;
+      end;
+    end;
+
+    if AMasterIds.HasNewMlkIdsSinceLastReset then
+    begin
+      for i := AMasterIds.LastMlkIdsCount to AMasterIds.MlkIds.Count - 1 do
+      begin
+        qryTreByMlkId.Params[0].AsLongId := AMasterIds.MlkIds[i];
+        qryTreByMlkId.open;
+        try
+          while not qryTreByMlkId.Eof do
+          begin
+            if AMasterIds.AddTreId(qryTreByMlkId.Fields[0].AsLongId, 'qryTreByMlkId.Fields[1], MlkId = ' + AMasterIds.MlkIds[i].ToStr) then
+              result := true;
+
+            if AMasterIds.AddAbnId(qryTreByMlkId.Fields[1].AsLongId, 'qryTreByMlkId.Fields[1], MlkId = ' + AMasterIds.MlkIds[i].ToStr) then
+              result := true;
+
+            qryTreByMlkId.Next;
+          end;
+        finally
+          qryTreByMlkId.Close;
+        end;
+      end;
+    end;
+
+    // ZptIds über TreIds selektieren
+    if AMasterIds.HasNewTreIdsSinceLastReset then
+    begin
+      // restliche ZptIds, MlkIds und AbnIds ahnand der TreIdsptIds selektieren!
+      for i := AMasterIds.LastTreIdsCount  to AMasterIds.TreIds.Count - 1 do
+      begin
+        qryZptIdByTreId.ParamByName('TRE_ID').AsLongId := AMasterIds.TreIds[i];
+        try
+          qryZptIdByTreId.Open();
+          if not qryZptIdByTreId.Eof and
+             AMasterIds.AddTreId(qryZptIdByTreId.Fields[0].AsLongId, 'qryZptIdByTreId.Fields[0], TreId = ' + AMasterIds.TreIds[i].ToStr) then
+           result := true;
+        finally
+          qryZptIdByTreId.Close;
+        end;
+
+        qryMlkByTreId.ParamByName('TRE_ID').AsLongId := AMasterIds.TreIds[i];
+        try
+          qryMlkByTreId.Open();
+          if not qryMlkByTreId.Eof and
+             AMasterIds.AddTreId(qryMlkByTreId.Fields[0].AsLongId, 'qryMlkByTreId.Fields[0], TreId = ' + AMasterIds.TreIds[i].ToStr) then
+           result := true;
+        finally
+          qryMlkByTreId.Close;
+        end;
+
+        qryLokByTreId.ParamByName('TRE_ID').AsLongId := AMasterIds.TreIds[i];
+        try
+          qryLokByTreId.Open();
+          if not qryLokByTreId.Eof and
+             AMasterIds.AddLokbId(qryLokByTreId.Fields[0].AsLongId, 'qryLokByTreId.Fields[0], TreId = ' + AMasterIds.TreIds[i].ToStr) then
+           result := true;
+        finally
+          qryLokByTreId.Close;
+        end;
+      end;
+    end;
+
+    // LokBuendel
+    if AMasterIds.HasNewZptIdsSinceLastReset then
+    begin
+      for i := AMasterIds.LastZptIdsCount  to AMasterIds.ZptIds.Count - 1 do
+      begin
+        // ZPT_ID_MELO, MLK_ID, NLK_ID, TRE_ID
+        qryLokByZptId.ParamByName('ZPT_ID').AsLongId := AMasterIds.ZptIds[i];
+        try
+          qryLokByZptId.Open();
+          while not qryLokByZptId.Eof do
+          begin
+            // LokB
+            if AMasterIds.AddLokbId(qryLokByZptId.Fields[1].AsLongId, 'qryLokByZptId.Fields[0], ZptId = ' + AMasterIds.ZptIds[i].ToStr) then
+               result := true;
+
+            // AbnId
+            if AMasterIds.AddAbnId(qryLokByZptId.Fields[1].AsLongId, 'qryLokByZptId.Fields[1], ZptId = ' + AMasterIds.ZptIds[i].ToStr) then
+               result := true;
+
+            // ZPT_ID_MELO
+            if not qryLokByZptId.Fields[2].IsNull and
+               AMasterIds.AddZptId(qryLokByZptId.Fields[2].AsLongId, 'qryLokByZptId.Fields[2], ZptId = ' + AMasterIds.ZptIds[i].ToStr) then
+               result := true;
+
+            // MLK_ID
+            if not qryLokByZptId.Fields[3].IsNull and
+               AMasterIds.AddMlkId(qryLokByZptId.Fields[3].AsLongId, 'qryLokByZptId.Fields[3], ZptId = ' + AMasterIds.ZptIds[i].ToStr) then
+               result := true;
+
+            // TRE_ID
+            if not qryLokByZptId.Fields[4].IsNull and
+               AMasterIds.AddTreId(qryLokByZptId.Fields[4].AsLongId, 'qryLokByZptId.Fields[4], ZptId = ' + AMasterIds.ZptIds[i].ToStr) then
+               result := true;
+
+             qryLokByZptId.Next;
+          end;
+        finally
+          qryLokByZptId.Close;
+        end;
+      end;
+    end;
+
+    if AMasterIds.HasNewMlkIdsSinceLastReset then
+    begin
+      for i := AMasterIds.LastMlkIdsCount to AMasterIds.MlkIds.Count - 1 do
+      begin
+        qryLokByMlkId.ParamByName('MLK_ID').AsLongId := AMasterIds.MlkIds[i];
+        try
+          qryLokByMlkId.Open();
+          while not qryLokByMlkId.Eof do
+          begin
+            // LokB
+            if AMasterIds.AddLokbId(qryLokByMlkId.Fields[1].AsLongId, 'qryLokByMlkId.Fields[0], MlkId = ' + AMasterIds.MlkIds[i].ToStr) then
+               result := true;
+
+            // AbnId
+            if AMasterIds.AddAbnId(qryLokByMlkId.Fields[1].AsLongId, 'qryLokByMlkId.Fields[1], MlkId = ' + AMasterIds.MlkIds[i].ToStr) then
+               result := true;
+
+            // ZPT_ID_MELO
+            if not qryLokByMlkId.Fields[2].IsNull and
+               AMasterIds.AddZptId(qryLokByMlkId.Fields[2].AsLongId, 'qryLokByMlkId.Fields[2], MlkId = ' + AMasterIds.MlkIds[i].ToStr) then
+               result := true;
+
+            // MLK_ID
+            if not qryLokByMlkId.Fields[3].IsNull and
+               AMasterIds.AddMlkId(qryLokByMlkId.Fields[3].AsLongId, 'qryLokByMlkId.Fields[3], MlkId = ' + AMasterIds.MlkIds[i].ToStr) then
+               result := true;
+
+            // TRE_ID
+            if not qryLokByMlkId.Fields[4].IsNull and
+               AMasterIds.AddTreId(qryLokByMlkId.Fields[4].AsLongId, 'qryLokByMlkId.Fields[4], MlkId = ' + AMasterIds.MlkIds[i].ToStr) then
+               result := true;
+
+             qryLokByMlkId.Next;
+          end;
+        finally
+          qryLokByMlkId.Close;
+        end;
+      end;
+    end;
+
+    // Lokationsbündel nachselektieren
+    if AMasterIds.HasNewLokbIdsSinceLastReset then
+    begin
+      for i := AMasterIds.LastLokbIdsCount  to AMasterIds.LokbIds.Count - 1 do
+      begin
+        qryLok.ParamByName('LOKB_ID').AsLongId := AMasterIds.LokbIds[i];
+        try
+          // ZPT_ID_MELO, MLK_ID, NLK_ID, TRE_ID
+          qryLok.Open();
+          while not qryLok.Eof do
+          begin
+            // ZPT_ID_MELO
+            if not qryLok.Fields[0].IsNull and
+               AMasterIds.AddZptId(qryLok.Fields[0].AsLongId, 'qryLok.Fields[0], LokbId = ' + AMasterIds.LokbIds[i].ToStr) then
+               result := true;
+
+            // MLK_ID
+            if not qryLok.Fields[1].IsNull and
+               AMasterIds.AddMlkId(qryLok.Fields[1].AsLongId, 'qryLok.Fields[1], LokbId = ' + AMasterIds.LokbIds[i].ToStr) then
+               result := true;
+
+            // TRE_ID
+            if not qryLok.Fields[2].IsNull and
+               AMasterIds.AddTreId(qryLok.Fields[2].AsLongId, 'qryLok.Fields[2], LokbId = ' + AMasterIds.LokbIds[i].ToStr) then
+               result := true;
+
+             qryLok.Next;
+          end;
+        finally
+          qryLok.Close;
+        end;
+      end;
+    end;
+
+    if AMasterIds.HasNewZptIdsSinceLastReset then
+    begin
+      // restliche AbnIds der ZptIds selektieren!
+      for i := AMasterIds.LastZptIdsCount to AMasterIds.ZptIds.Count - 1 do
+      begin
+        qryAbnIds.ParamByName('ZPT_ID').AsLongId := AMasterIds.ZptIds[i];
+        try
+          qryAbnIds.Open();
+          if not qryAbnIds.Eof then
+            AMasterIds.AddAbnId(qryAbnIds.Fields[0].AsLongId, 'qryAbnIds.Fields[0], ZptId = ' + AMasterIds.ZptIds[i].ToStr)
+        finally
+          qryAbnIds.Close;
+        end;
+      end;
+    end;
+  end;
+
+  procedure DoInitialSelects(AMndId: TMndIdParam; AMaloCodes: TStringList);
+  var idsAdded: Boolean;
+  begin
+    idsAdded := true;
+    while idsAdded do
+    begin
+      GetMasterIds(AMndId).ResetCounter;
+      while idsAdded do
+        idsAdded := SelectZptIds(GetMasterIds(AMndId), AMaloCodes);
+
+      idsAdded := SelectKndIdsByZptIds(GetMasterIds(AMndId));
+      if SelectKndIdsByKzeUndKndFieldss(GetMasterIds(AMndId)) then
+        idsAdded := true;
+    end;
+  end;
+
+var
+  i, mndId: Integer;
+  qryZptIds: TSQLQuery;
+  maloCodes: TStringList;
+  masterIdsOther: TExportMndMasterIds;
+
+
+begin
+  qryMesId := fConnection.CreateSQLQuery;
+  qryMesId.SQL.Text := 'SELECT zpt.ZPT_ID, ZPT_MASTERZPT_ID, ZPT_MASTERZPT_ID2, zpt.abn_id, mes.mes_id FROM ' + ENMES + ' mes JOIN ' + ENZPT + ' zpt ON zpt.zpt_id = mes.zpt_id WHERE KND_ID = :KND_ID';
+  qryMesId.DBPrepare;
+
+  qryZpth := fConnection.CreateSQLQuery;
+  qryZpth.SQL.Text := 'SELECT ZPTH_ABRECHNUNGSZPT_ID, ZPT_ID FROM ' + ENZPTH + ' WHERE ZPTH_ABRECHNUNGSZPT_ID = :ZPT_ID OR ZPT_ID = :ZPT_ID';
+  qryZpth.DBPrepare;
+
+  qryZpttr := fConnection.CreateSQLQuery;
+  qryZpttr.SQL.Text := 'SELECT ZPT_ID_MALO, ZPT_ID_TRANCHE FROM ' + ENZPTTR + ' WHERE ZPT_ID_MALO = :ZPT_ID OR ZPT_ID_TRANCHE = :ZPT_ID';
+  qryZpttr.DBPrepare;
+
+  qryMesIdKnd := fConnection.CreateSQLQuery;
+  qryMesIdKnd.SQL.Text := 'SELECT KND_ID, MES_ID, MES_MASTERMES_ID FROM ' + ENMES + ' WHERE ZPT_ID = :ZPT_ID';
+  qryMesIdKnd.DBPrepare;
+
+  qryEanlIdKnd := fConnection.CreateSQLQuery;
+  qryEanlIdKnd.SQL.Text := 'SELECT KND_ID, ezpa.eanl_id ' + CR_LF +
+                           ' FROM ' + ENEANB + ' eabw JOIN ' + ENEZPA + ' ezpa ON ezpa.eanl_id = eabw.eanl_id ' + CR_LF +
+                           'WHERE ZPT_ID = :ZPT_ID';
+  qryEanlIdKnd.DBPrepare;
+
+  qryEavKndId := fConnection.CreateSQLQuery;
+  qryEavKndId.SQL.Text :=  'SELECT DISTINCT mes.ZPT_ID, ezpa.eanl_id, mes.mes_id ' + CR_LF +
+                          'FROM ' + ENEAV  + ' eav JOIN '+ ENEAVS + ' eavs on eav.eav_id = eavs.eav_id ' + CR_LF +
+                          ' JOIN ' + ENEZPA + ' ezpa ON ezpa.eanl_id = eav.eanl_id ' + CR_LF +
+                          ' JOIN ' + ENMES + ' mes ON mes.zpt_id = ezpa.zpt_id ' + CR_LF +
+                          ' WHERE mes.knd_id = :KND_ID';
+  qryEavKndId.DBPrepare;
+
+  qryEagt := fConnection.CreateSQLQuery;
+  qryEagt.SQL.Text :=  'SELECT DISTINCT eanb.KND_ID, eanb.eanl_id ' + CR_LF +
+                          'FROM ' + ENEANB  + ' eanb JOIN '+ ENEAGT + ' eagt on eanb.eanl_id = eagt.eanl_id ' + CR_LF +
+                          ' JOIN ' + ENEAGT + ' eagt2 ON eagt2.eag_id = eagt.eag_id ' + CR_LF +
+                          ' JOIN ' + ENEANB + ' eanb2 ON eanb2.eanl_id = eagt2.eanl_id ' + CR_LF +
+                          ' WHERE eanb2.knd_id = :KND_ID';
+  qryEagt.DBPrepare;
+
+  qryZmlkByMlkId := fConnection.CreateSQLQuery;
+  qryZmlkByMlkId.SQL.Text := 'SELECT DISTINCT ZPT_ID ' + CR_LF +
+                             'FROM ' + ENZMLK + ' zmlk ' + CR_LF +
+                             'WHERE MLK_ID = :MLK_ID';
+
+  qryZmlkByMlkId.DBPrepare;
+
+  qryZmlkByZptId := fConnection.CreateSQLQuery;
+  qryZmlkByZptId.SQL.Text := 'SELECT DISTINCT zmlk.MLK_ID, MLK_CODE ' + CR_LF +
+                             'FROM ' + ENZMLK + ' zmlk JOIN ' + ENMLK + ' MLK ON mlk.mlk_id = zmlk.mlk_id' + CR_LF +
+                             'WHERE ZPT_ID = :ZPT_ID';
+
+  qryZmlkByZptId.DBPrepare;
+
+  qryKndNextPrev := fConnection.CreateSQLQuery;
+  qryKndNextPrev.SQL.Text := 'SELECT KND_NEXTKND_ID, KND_PREVKND_ID ' + CR_LF +
+                             'FROM ' + ENKND + CR_LF +
+                             'WHERE KND_ID = :KND_ID';
+  qryKndNextPrev.DBPrepare;
+
+  qryKzeNextKnd := fConnection.CreateSQLQuery;
+  qryKzeNextKnd.SQL.Text := 'SELECT KZE_NACHFOLGERKND_ID' + CR_LF +
+                             'FROM ' + ENKZE + CR_LF +
+                             'WHERE KND_ID = :KND_ID';
+  qryKzeNextKnd.DBPrepare;
+
+  qryAbnIds := fConnection.CreateSQLQuery;
+  qryAbnIds.SQL.Text := 'SELECT ABN_ID' + CR_LF +
+                        'FROM ' + ENZPT + CR_LF +
+                        ' WHERE ZPT_ID = :ZPT_ID';
+  qryAbnIds.DBPrepare;
+
+  qryTreByMlkId := fConnection.CreateSQLQuery;
+  qryTreByMlkId.SQL.Text := 'SELECT tre.TRE_ID,  tre.ABN_ID ' + CR_LF +
+                             'FROM ' + ENTRMA + ' trma JOIN ' + ENTRE + ' tre ON tre.tre_id = trma.tre_id' + CR_LF +
+                             ' WHERE MLK_ID = :MLK_ID';
+  qryTreByMlkId.DBPrepare;
+
+  qryTreByZptId := fConnection.CreateSQLQuery;
+  qryTreByZptId.SQL.Text := 'SELECT tre.TRE_ID,  tre.ABN_ID ' + CR_LF +
+                             'FROM ' + ENTRME + ' trme JOIN ' + ENTRE + ' tre ON tre.tre_id = trme.tre_id' + CR_LF +
+                            ' WHERE ZPT_ID = :ZPT_ID';
+  qryTreByZptId.DBPrepare;
+
+  qryZptIdByTreId := fConnection.CreateSQLQuery;
+  qryZptIdByTreId.SQL.Text := 'SELECT ZPT_ID ' + CR_LF +
+                             'FROM ' + ENTRME + CR_LF +
+                            ' WHERE TRE_ID = :TRE_ID';
+  qryZptIdByTreId.DBPrepare;
+
+  qryMlkByTreId := fConnection.CreateSQLQuery;
+  qryMlkByTreId.SQL.Text := 'SELECT MLK_ID ' + CR_LF +
+                             'FROM ' + ENTRMA + CR_LF +
+                             ' WHERE TRE_ID = :TRE_ID';
+  qryMlkByTreId.DBPrepare;
+
+  qryLokByZptId := fConnection.CreateSQLQuery;
+  qryLokByZptId.SQL.Text := 'SELECT lokb.lokb_id, lokb.abn_id, ZPT_ID_MELO, MLK_ID, NLK_ID, TRE_ID ' + CR_LF +
+                           ' FROM ' + ENLOKB + ' lokb ' + CR_LF +
+                           ' JOIN ' + ENLOKBZ + ' lokbz on lokb.lokb_id = lokbz.lokb_id ' + CR_LF +
+                           ' JOIN ' + ENLOKBE + ' lokbe on lokbe.lokbz_id = lokbz.lokbz_id ' + CR_LF +
+                           'WHERE ZPT_ID_MELO = :ZPT_ID';
+  qryLokByZptId.DBPrepare;
+
+  qryLokByMlkId := fConnection.CreateSQLQuery;
+  qryLokByMlkId.SQL.Text := 'SELECT lokb.lokb_id, lokb.abn_id, ZPT_ID_MELO, MLK_ID, NLK_ID, TRE_ID ' + CR_LF +
+                           ' FROM ' + ENLOKB + ' lokb ' + CR_LF +
+                           ' JOIN ' + ENLOKBZ + ' lokbz on lokb.lokb_id = lokbz.lokb_id ' + CR_LF +
+                           ' JOIN ' + ENLOKBE + ' lokbe on lokbe.lokbz_id = lokbz.lokbz_id ' + CR_LF +
+                           'WHERE MLK_ID = :MLK_ID';
+  qryLokByMlkId.DBPrepare;
+
+  qryLokByTreId := fConnection.CreateSQLQuery;
+  qryLokByTreId.SQL.Text := 'SELECT lokb.lokb_id, lokb.abn_id, ZPT_ID_MELO, MLK_ID, NLK_ID, TRE_ID ' + CR_LF +
+                           ' FROM ' + ENLOKB + ' lokb ' + CR_LF +
+                           ' JOIN ' + ENLOKBZ + ' lokbz on lokb.lokb_id = lokbz.lokb_id ' + CR_LF +
+                           ' JOIN ' + ENLOKBE + ' lokbe on lokbe.lokbz_id = lokbz.lokbz_id ' + CR_LF +
+                           'WHERE TRE_ID = :TRE_ID';
+  qryLokByTreId.DBPrepare;
+
+  qryLok := fConnection.CreateSQLQuery;
+  qryLok.SQL.Text := 'SELECT ZPT_ID_MELO, MLK_ID, NLK_ID, TRE_ID ' + CR_LF +
+                     ' FROM ' + ENLOKBZ + ' lokbz ' + CR_LF +
+                     ' JOIN ' + ENLOKBE + ' lokbe on lokbe.lokbz_id = lokbz.lokbz_id ' + CR_LF +
+                     'WHERE LOKB_ID = :LOKB_ID';
+  qryLok.DBPrepare;
+
+  qryZptIds := fConnection.CreateSQLQuery;
+  maloCodes := TStringList.Create;
+  GetMasterIds(fMndId).KndIds.AddRange(AMndKndIdListe);
+  try
+    FEckdaten.AddInitialKndIds(AMndKndIdListe); // Nur die Zählpunkte dieses Kunden sind vollständig mit allen anderen Kunden exportiert!!
+
+    DoInitialSelects(fMndId, maloCodes);
+    if (GetMasterIds(fMndId).ZptIds.Count > 0) and FExportOptionen.DoAndereMandanten then
+    begin
+      SetStatus('Ermittle Kunden in anderen Mandanten');
+
+      qryZptIds.SQL.Text := 'SELECT ZPT_ID, ABN_ID, MND_ID FROM ' + ENZPT + CR_LF +
+                            ' WHERE ZPT_METERINGCODE = (SELECT ZPT_METERINGCODE FROM ' +  ENZPT + '  WHERE ZPT_ID = :ZPT_ID)' + CR_LF +
+                            '  AND MND_ID <> ' + IntToStr(fMndId);
+      qryZptIds.DBPrepare;
+      for i := 0 to  GetMasterIds(fMndId).ZptIds.Count - 1 do
+      begin
+        qryZptIds.Params[0].AsLongId := GetMasterIds(fMndId).zptIds[i];
+        qryZptIds.open;
+        try
+          while not qryZptIds.Eof do
+          begin
+            masterIdsOther := GetMasterIds(qryZptIds.Fields[2].AsInteger);
+            masterIdsOther.AddZptId(qryZptIds.Fields[0].AsLongId, 'qryZptIds(1).Fields[0], ZptId = ' + qryZptIds.Params[0].AsString);
+            masterIdsOther.AddAbnId(qryZptIds.Fields[1].AsLongId, 'qryZptIds(1).Fields[0], ZptId = ' + qryZptIds.Params[0].AsString);
+            qryZptIds.Next;
+          end;
+        finally
+          qryZptIds.Close;
+        end;
+      end;
+
+      qryZptIds.SQL.Text := 'SELECT zmlk.ZPT_ID, mlk.MND_ID, mlk.MLK_ID FROM ' + ENZMLK + ' zmlk JOIN ' + ENMLK + ' mlk ON mlk.mlk_id = zmlk.mlk_id ' + CR_LF +
+                            ' WHERE MLK_CODE = :MLK_CODE AND MND_ID <> ' + IntToStr(fMndId);
+      for i := 0 to maloCodes.Count - 1 do
+      begin
+        qryZptIds.Params[0].AsString := maloCodes[i];
+        qryZptIds.open;
+        try
+          while not qryZptIds.Eof do
+          begin
+            masterIdsOther := GetMasterIds(qryZptIds.Fields[1].AsInteger);
+            masterIdsOther.AddZptId(qryZptIds.Fields[0].AsLongId, 'qryZptIds(2).Fields[0], MlkCode = ' + qryZptIds.Params[0].AsString);
+            masterIdsOther.AddMlkId(qryZptIds.Fields[2].AsLongId, 'qryZptIds(2).Fields[0], MlkCode = ' + qryZptIds.Params[0].AsString);
+            qryZptIds.Next;
+          end;
+        finally
+          qryZptIds.Close;
+        end;
+      end;
+
+      for mndId in FMndMasterIds.KeyCollection do
+        if mndId <> fMndId then
+        begin
+          masterIdsOther := GetMasterIds(mndId);
+          if (masterIdsOther.ZptIds.Count = 0) then
+            Continue;
+
+          DoInitialSelects(mndId, maloCodes);
+        end;
+    end;
+  finally
+    qryZptIds.Free;
+    qryMesId.Free;
+    qryMesIdKnd.Free;
+    qryZpth.Free;
+    qryZpttr.Free;
+    qryEanlIdKnd.Free;
+    maloCodes.free;
+    qryZmlkByZptId.Free;
+    qryZmlkByMlkId.Free;
+    qryEavKndId.free;
+    qryEagt.free;
+    qryAbnIds.Free;
+    qryKzeNextKnd.Free;
+    qryKndNextPrev.Free;
+    qryTreByZptId.Free;
+    qryTreByMlkId.Free;
+    qryZptIdByTreId.Free;
+    qryMlkByTreId.Free;
+    qryLokByZptId.Free;
+    qryLokByMlkId.Free;
+    qryLokByTreId.Free;
+    qryLok.Free;
+  end;
+end;
+
+procedure TKundenExport.InitSelects(AMndId: Integer);
+begin
+  fSelectENEANL         := 'SELECT * FROM ' + ENEANL + ' WHERE eanl_id = :eanl_id';
+
+  fSelectENABN := 'SELECT abn_id, mnd_id, abn_status, abn_plz, abn_ort, abn_suchfeldort, abn_strasse, abn_hausnr, abn_hausunternr, '
+                + 'abn_suchfeldstrasse, abn_land, bzk_nr FROM ' + ENABN + ' WHERE abn_id = :abn_id';
+
+  fSelectZPT_ENZPTH     := 'SELECT DISTINCT * FROM ' + ENZPT + ' WHERE zpt_id IN (SELECT zpth.zpth_abrechnungszpt_id FROM ' + ENZPTH + ' zpth '
+    + 'WHERE zpt_id IN (SELECT zpt_id FROM ' + ENEZPA + ' ezpa WHERE eanl_id = :eanl_id )) '
+    + 'OR zpt_id IN (SELECT zpth.zpt_id FROM ' + ENZPTH + ' zpth '
+    + 'WHERE zpth_abrechnungszpt_id IN (SELECT zpt_id FROM ' + ENEZPA + ' ezpa WHERE eanl_id = :eanl_id )) ';
+  fSelectZPT_ENEANL     := 'SELECT * FROM ' + ENZPT + ' WHERE zpt_id IN (SELECT eanl.zpt_id FROM ' + ENEANL + ' eanl WHERE eanl_id = :eanl_id )';
+  fSelectZPT_ENEZPA     := 'SELECT * FROM ' + ENZPT + ' WHERE zpt_id IN (SELECT ezpa.zpt_id FROM ' + ENEZPA + ' ezpa WHERE eanl_id = :eanl_id )';
+  fSelectZPT_ENEAVS     := 'SELECT * FROM ' + ENZPT + ' WHERE zpt_id IN (SELECT eavs.zpt_id FROM ' + ENEAV + ' eav, ' + ENEAVS + ' eavs WHERE eav.eav_id = eavs.eav_id AND eav.eanl_id = :eanl_id )';
+
+  fSelectZPT_ENZPTH_DEBITOR := 'SELECT DISTINCT * FROM ' + ENZPT + ' WHERE zpt_id IN ('
+    + 'SELECT zpth.zpth_abrechnungszpt_id FROM ' + ENZPTH + ' zpth '
+    + 'WHERE zpt_id = :zpt_id) '
+    + 'OR zpt_id IN (SELECT zpth.zpt_id FROM ' + ENZPTH + ' zpth '
+    + 'WHERE zpth_abrechnungszpt_id = :zpt_id) ';
+
+  fSelectENMES     := 'SELECT * FROM ' + ENMES + ' WHERE zpt_id = :zpt_id';
+
+  fSelectENMESUeberKndId := 'SELECT * FROM ' + ENMES + ' WHERE knd_id = :knd_id';
+
+  fSelectENEAPW         := 'SELECT * FROM ' + ENEAPW + ' eapw WHERE eapw.eanl_id = :eanl_id';
+
+  fSelectENEZPA         := 'SELECT * FROM ' + ENEZPA + ' WHERE eanl_id = :eanl_id';
+
+  fSelectENEZPAV        := 'SELECT * FROM ' + ENEZPAV + ' WHERE ezpa_id IN (SELECT ezpa.ezpa_id FROM ' + ENEZPA + ' ezpa WHERE eanl_id = :eanl_id )';
+
+  fSelectENEAV          := 'SELECT * FROM ' + ENEAV + ' WHERE eanl_id = :eanl_id';
+  fSelectENEAVS         := 'SELECT eavs.* FROM ' + ENEAV + ' eav, ' + ENEAVS + ' eavs WHERE eav.eav_id = eavs.eav_id AND eanl_id = :eanl_id';
+  fSelectENEAVSV        := 'SELECT * FROM ' + ENEAVSV + ' WHERE eavs_id IN (' +
+                              'SELECT eavs.eavs_id FROM ' + ENEAV + ' eav, ' + ENEAVS + ' eavs WHERE eav.eav_id = eavs.eav_id AND eanl_id = :eanl_id)';
+
+  fSelectENZPTH         := 'SELECT DISTINCT * FROM ' + ENZPTH + ' WHERE zpt_id IN (SELECT ezpa.zpt_id FROM ' + ENEZPA + ' ezpa WHERE eanl_id = :eanl_id ) '
+   + ' OR zpth_abrechnungszpt_id IN (SELECT ezpa.zpt_id FROM ' + ENEZPA + ' ezpa WHERE eanl_id = :eanl_id ) ';
+
+  fSelectENZPTH_DEBITOR := 'SELECT DISTINCT * FROM ' + ENZPTH + ' WHERE zpt_id = :zpt_id '
+   + ' OR zpth_abrechnungszpt_id = :zpt_id';
+
+  fSelectENZPT := 'SELECT * FROM ' + ENZPT + ' zpt WHERE zpt_id = :zpt_id';
+
+  fSelectENEANB         := 'SELECT * FROM ' + ENEANB + ' WHERE eanl_id = :eanl_id';
+
+  fSelectENEAD          := 'SELECT * FROM ' + ENEAD + ' WHERE eanl_id = :eanl_id';
+
+  fSelectENZPO := 'SELECT zpo.* FROM ' + ENZPO + ' zpo WHERE zpo.zpt_id = :zpt_id';
+  FSelectENZPOVR := 'SELECT * ' + CR_LF +
+                   ' FROM ' + ENZPOVR + ' zpovr ' + CR_LF +
+                   ' WHERE zpo_id IN (SELECT zpo_id ' + CR_LF +
+                   '                   FROM ' + ENZPO + ' zpo  ' + CR_LF +
+                   '                  WHERE zpo.zpt_id = :zpt_id)';
+  FSelectENZPOV := 'SELECT * FROM ' + ENZPOV + CR_LF +
+                   'WHERE zpovr_id  IN (SELECT zpovr_id ' + CR_LF +
+                   '                     FROM ' + ENZPOVR + ' zpovr ' + CR_LF +
+                   '                    WHERE zpo_id IN (SELECT zpo_id ' + CR_LF +
+                   '                                      FROM ' + ENZPO + ' zpo ' + CR_LF +
+                   '                                     WHERE zpo.zpt_id = :zpt_id))';
+
+  fSelectENZPOE := 'SELECT zpoe.* FROM ' + ENZPOE + ' zpoe WHERE zpoe.zpo_id IN (SELECT zpo.zpo_id FROM ' + ENZPO + ' zpo '
+    + ' WHERE zpo.zpt_id = :zpt_id)';
+
+  fSelectENSMA := 'SELECT * FROM ' + ENSMA + ' WHERE zpt_id = :zpt_id';
+
+  fSelectENZPMPR := 'SELECT * ' + CR_LF +
+                   ' FROM ' + ENZPMPR + ' zpmpr ' + CR_LF +
+                    'WHERE zpt_id = :zpt_id';
+
+  FSelectENZPMVR := 'SELECT * ' + CR_LF +
+                    ' FROM ' + ENZPMVR + ' zpmvr ' + CR_LF +
+                    ' WHERE zpmpr_id IN (SELECT zpmpr_id ' + CR_LF +
+                    '                     FROM ' + ENZPMPR + ' zpmpr ' + CR_LF +
+                    '                   WHERE zpt_id = :zpt_id)';
+  FSelectENZPMV := 'SELECT * FROM ' + ENZPMV + CR_LF +
+                    'WHERE zpmvr_id  IN (SELECT zpmvr_id ' + CR_LF +
+                    '                     FROM ' + ENZPMVR + ' zpmvr ' + CR_LF +
+                    '                     WHERE zpmpr_id IN (SELECT zpmpr_id ' + CR_LF +
+                    '                                         FROM ' + ENZPMPR + ' zpmpr ' + CR_LF +
+                    '                                        WHERE zpt_id = :zpt_id))';
+
+  fSelectENZPZ := 'SELECT zpz.* FROM ' + ENZPZ + ' zpz, ' + ENZPG + ' zpg WHERE zpg.zpg_id = zpz.zpg_id AND zpg.zpt_id = :zpt_id';
+
+  fSelectENZPS := 'SELECT zps.* FROM ' + ENZPS + ' zps WHERE zpz_id IN (SELECT zpz.zpz_id FROM ' + ENZPZ + ' zpz, '
+       + ENZPG + ' zpg WHERE zpg.zpg_id = zpz.zpg_id AND zpg.zpt_id = :zpt_id)';
+
+  fSelectENMVA := 'SELECT * FROM ' + ENMVA + ' WHERE mes_id IN (SELECT mes_id FROM ' + ENMES + ' WHERE zpt_id = :zpt_id)';
+
+  fSelectENZPB := 'SELECT * FROM ' + ENZPB + ' zpb WHERE mes_id IN (SELECT mes_id FROM ' + ENMES + ' WHERE zpt_id = :zpt_id)';
+
+  fSelectENZPBD := 'SELECT * FROM ' + ENZPBD + ' zpbd WHERE zpt_id = :zpt_id';
+
+  fSelectENZPN := 'SELECT * FROM ' + ENZPN + ' zpn WHERE zpt_id = :zpt_id';
+
+  fSelectENEAB := 'SELECT * FROM ' + ENEAB + ' WHERE eanl_id = :eanl_id';
+
+  fSelectENEABT:= 'SELECT * fROM ' + ENEABT + ' WHERE eab_id IN (SELECT eab_id FROM ' + ENEAB + ' WHERE eanl_id = :eanl_id)';
+
+  fSelectENEABP:= 'SELECT * fROM ' + ENEABP + ' WHERE eab_id IN (SELECT eab_id FROM ' + ENEAB + ' WHERE eanl_id = :eanl_id)';
+
+  fSelectENEAG := 'SELECT * FROM ' + ENEAG + ' WHERE eag_id IN (SELECT eag_id FROM ' + ENEAGT + ' WHERE eanl_id = :eanl_id)';
+
+  fSelectENEAGT:= 'SELECT * FROM ' + ENEAGT + ' WHERE eanl_id = :eanl_id';
+
+  fSelectENEASE:= 'SELECT * FROM ' + ENEASE + ' WHERE eanl_id = :eanl_id';
+
+  fSelectAnlagenMitGemeinsamerMessung := 'SELECT DISTINCT eanl_id FROM ' + ENEZPA + ' ezpa WHERE zpt_id IN ( ' + CR_LF
+        + ' SELECT zpt_id FROM ' + ENEZPA + ' ezpa2 WHERE eanl_id = :eanl_id ' + CR_LF
+        + ' AND ezpa.ezpa_beginn <= NVL(ezpa2.ezpa_ende, TO_DATE(''31.12.2999'', ''DD.MM.YYYY''))' + CR_LF
+        + ' ) ' + CR_LF
+        + ' AND eanl_id <> :eanl_id ';
+
+  fSelectAnlagenAusAnlagengruppe := 'SELECT * FROM ' + ENEAGT + ' WHERE eag_id IN ( ' + CR_LF
+        + ' SELECT eag_id FROM ' + ENEAGT + ' WHERE eanl_id = :eanl_id ' + CR_LF
+        + ' ) ' + CR_LF
+        + ' AND eanl_id <> :eanl_id';
+
+  fSelectAnlagenAusSpeicherZuordnung := 'SELECT eanl_id FROM ' + ENEANLSP + ' WHERE speicher_id = :speicher_id';
+  fSelectSpeicherAusSpeicherZuordnung := 'SELECT speicher_id FROM ' + ENEANLSP + ' WHERE eanl_id = :eanl_id';
+
+  fSelectENKND := 'SELECT knd.*, trim(gsprolle.rolle) AS KREDITOR_DEBITOR FROM ' + ENKND + ' knd, CS2.G4BM_GSPROLLE gsprolle '
+    + 'WHERE knd.knd_id = :knd_id AND knd.ro_id = gsprolle.id';
+
+  fSelectENZPD          := 'SELECT * FROM ' + ENZPD + ' WHERE zpt_id = :zpt_id';
+
+  fSelectENERVZPEanl := 'SELECT * FROM ' + ENERVZP  + ' WHERE eanl_id = :eanl_id';
+
+  fSelectENERVZPZpt := 'SELECT * FROM ' + ENERVZP  + ' WHERE zpt_id = :zpt_id';
+
+  fSelectENERV := 'SELECT * FROM ' + ENERV + ' WHERE erv_id = :erv_id';
+
+  fSelectENERVA := 'SELECT * FROM ' + ENERVA + ' WHERE eanl_id = :eanl_id';
+
+  fSelectENERVZT := 'SELECT * FROM ' + ENERVZT + ' WHERE erv_id = :erv_id';
+
+  fSelectENTRE := 'SELECT * FROM ' + ENTRE + ' WHERE tre_id = :tre_id';
+
+  fSelectENEAZU := 'SELECT * FROM ' + ENEAZU + ' WHERE eanl_id = :eanl_id';
+
+  fSelectENEAZUD := 'SELECT * FROM ' + ENEAZUD + ' WHERE eazu_id IN (SELECT eazu_id FROM ' + ENEAZU + ' WHERE eanl_id = :eanl_id)';
+
+  fSelectENEAEAM := 'SELECT * FROM ' + ENEAEAM + ' WHERE  eanl_id = :eanl_id';
+
+  fSelectENAVMP := 'SELECT * FROM ' + ENAVMP + ' WHERE mes_id IN (SELECT mes_id FROM ' + ENMES + ' WHERE zpt_id = :zpt_id)';
+
+  fSelectENEPEXRI := 'SELECT * FROM ' + ENEPEXRI + ' WHERE  eanl_id = :eanl_id';
+
+  fSelectENEAPO := 'SELECT * FROM ' + ENEAPO + ' WHERE eanl_id = :eanl_id';
+
+  fSelectENERG := 'SELECT * FROM ' + ENERG + ' WHERE erg_id IN (SELECT erg_id FROM ' + ENEARG + ' WHERE eanl_id = :eanl_id)';
+
+  fSelectENEARG := 'SELECT * FROM ' + ENEARG + ' WHERE eanl_id = :eanl_id';
+
+  fSelectENMLK := 'SELECT * FROM ' + ENMLK + ' mlk WHERE mlk.mlk_id IN (SELECT DISTINCT zmlk.mlk_id FROM '
+                  + ENZMLK + ' zmlk WHERE zmlk.zpt_id = :zpt_id)';
+
+  fSelectENZMLK := 'SELECT * FROM ' + ENZMLK + ' zmlk WHERE zmlk.zpt_id = :zpt_id';
+
+  fSelectENGERP := 'SELECT GERP.gerp_id, GERP.mnd_id, GERP.abn_id, GERP.gerp_bezeichnung, 0 AS gerp_standard FROM ' + ENGERP + ' gerp JOIN ' + ENZPG + ' ZPG ON zpg.gerp_id = gerp.gerp_id WHERE zpg.zpg_id = :zpg_id';
+  fSelectENGERP_ABN := 'SELECT gerp_id, mnd_id, abn_id, gerp_bezeichnung, 0 AS gerp_standard FROM ' + ENGERP + ' WHERE abn_id = :abn_id';
+
+  fSelectENENVP := 'SELECT envp_id, mnd_id, envp_bezeichnung || ''_Import_' + DatetimeToStr(now) + ''' AS envp_bezeichnung FROM ' + ENENVP + ' envp WHERE envp_id IN (SELECT envp_id FROM ' + ENEANV + ' WHERE eanl_id = :eanl_id)';
+  fSelectENEANV := 'SELECT * FROM ' + ENEANV + ' eanv WHERE eanl_id = :eanl_id';
+
+//Prozess
+  fSelectENPRZ := 'SELECT * FROM ' + ENPRZ + ' WHERE prz_id = :prz_id';
+  fSelectENRPR := 'SELECT * FROM ' + ENRPR + ' WHERE prz_id = :prz_id AND knd_id = :knd_id';
+  fSelectENFDEF := 'SELECT * FROM ' + ENFDEF + ' WHERE prz_id = :prz_id AND knd_id = :knd_id';
+  fSelectENFSU := 'SELECT * FROM ' + ENFSU + ' WHERE prz_id = :prz_id AND knd_id = :knd_id';
+  fSelectENFVB := 'SELECT * FROM ' + ENFVB + ' WHERE prz_id = :prz_id AND knd_id = :knd_id';
+  fSelectENKNV := 'SELECT * FROM ' + ENKNV + ' WHERE prz_id = :prz_id AND knd_id = :knd_id';
+  fSelectENKNVA := 'SELECT * FROM ' + ENKNVA + ' WHERE prz_id = :prz_id AND knd_id = :knd_id';
+  fSelectENMLR := 'SELECT * FROM ' + ENMLR + ' WHERE prz_id = :prz_id AND knd_id = :knd_id';
+  fSelectENSPZ := 'SELECT * FROM ' + ENSPZ + ' WHERE prz_id = :prz_id';
+  fSelectENVFI := 'SELECT * FROM ' + ENVFI + ' WHERE prz_id = :prz_id AND knd_id = :knd_id';
+  fSelectENVKZ := 'SELECT prz_id, mnd_id, vkz_id, knd_id, mes_id, vba_nr, knz_id, abn_id, vkz_standbeginn, vkz_standende, vkz_abrbeginn, vkz_abrende, ' +
+                  'vkz_ableseart, vkz_ablesedatum, vkz_ablesestand, vkz_zaehlwerknr, vkz_zae_nr, vkz_kontroll, prz_idursprung, vkz_wandlerfaktor, ' +
+                  'vkz_verbrauch, vkz_verbrauchgew, vkz_verbrauchber, vkz_umrechnungsfaktor, vkz_energieart, vkz_zeitpunkt, vkz_vorlaeufig, ' +
+                  'vkz_stichtag, vkz_abzugsmes_id, vkz_abzugsart, vkz_hauptknz_id, vkz_brennwert, vkz_zustandszahl, vkz_zaehlwerkbezeichnung, ' +
+                  'vkz_vgtverbrauch, vkz_vgt_prozent, mva_id, mvd_id, mvv_id, zpt_id, vkz_mastermvd_id, vkz_mastermvv_id, ezpa_typ, ' +
+                  'zpz_id, zps_id, zpo_id, zpoe_id ' +
+                  'FROM ' + ENVKZ + ' WHERE prz_id = :prz_id AND knd_id = :knd_id';
+  fSelectENVFM := 'SELECT MND_ID, PRZ_ID, KND_ID, FMD_ID, RECHNUNGS_ADR_ID, VFM_FAK_DATUM, VFM_FAK_NR, VFM_KND_NR1, VFM_KND_NR2, ''Max Mustermann'' AS VFM_NAME, ' +
+                  '''89079'' AS VFM_PLZ, ''Wiblingen'' AS VFM_ORT, VFM_ABSCHLAGSFORMULAR, VFM_ZAHLUNGSART, VFM_ZAHLBETRAG_EURO, VFM_ZAHLBETRAG, ' +
+                  'VFM_ABRBEGINN, VFM_ABRENDE, VFM_BUC_DATUM, VFM_AUFBAURECHNUNG, VFM_BTR_NR, VFM_GEPRUEFT, PRZ_IDSTORNO, VFM_GANGFOLGE_NR, VFM_LTO_NR, ' +
+                  'VFM_SEITENANZAHL, VFM_LFDNR, VFM_BUCHUNGEN_BIS, VFM_BUC_FAELLIG, VFM_RECHNUNGSREPORT, VFM_ABSCHLAGFAELLIGTEXT, VFM_ABS_BEI_VERRECHNUNG, ' +
+                  'VFM_ANGELEGT, VFM_ZAHLBETRAG_AW, VFM_STICHTAG, VFM_VERBRAUCH_BISDATUM, VFM_RECHNUNGSBETRAG, VFM_RECHNUNGSART, VFM_GEBUEHRENBESCHEID, VFM_ABSTURNUS, ' +
+                  'VFM_JAHRESABSCHLAG, VFM_STICHTAGSABRECHNUNG, VFM_SCHLUSSBESCHEID, VFM_VERSIONSNR, VFM_WARNUNG, VFM_BELEGDATUM, VFM_GEBUEHRENSALDO, ' +
+                  'VFM_SOLLSTELLUNGPRZ_ID, VFM_BRW_PRUEFEN,  VTK_BEZEICHNUNG, VFM_TRANSFERIERT, VFM_LFDNR_REC, VFM_UMSSTAKTIV, VFM_SUMME_ANZAHLUNGEN, ' +
+                  'VFM_KEIN_KONTAKT, VFM_STORNOTEXT_NEUE_RECHNUNG, VFM_FAK_NR_STORNO_REC, VFM_FAK_DATUM_STORNO_REC, PRZ_ID_STORNO_REC, VFM_RECNR_EXT, VFM_PRZID_EXT ' +
+                  'FROM ' + ENVFM + ' WHERE prz_id = :prz_id AND knd_id = :knd_id';
+  fSelectENVFS := 'SELECT PRZ_ID, KND_ID, VFS_LFDNR, VFS_SATZART, VFS_ENERGIEART, VFS_BLOCK_NR, VFS_BETRAG, VFS_BETRAG_EURO, PRZ_IDSTORNO, TRANSFER_DATUM, VFS_BETRAG_AW, ' +
+                  'ABN_ID, VFME_ID FROM ' + ENVFS + ' WHERE prz_id = :prz_id AND knd_id = :knd_id';
+  fSelectENVFA := 'SELECT * FROM ' + ENVFA + ' WHERE knv_id IN (SELECT knv_id FROM ' + ENKNV + ' WHERE prz_id = :prz_id AND knd_id = :knd_id)';
+  fSelectENVFAA := 'SELECT * FROM ' + ENVFAA + ' WHERE knv_id IN (SELECT knv_id FROM ' + ENKNVA + ' WHERE prz_id = :prz_id AND knd_id = :knd_id)';
+  fSelectENVFAI := 'SELECT * FROM ' + ENVFAI + ' WHERE knv_id IN (SELECT knv_id FROM ' + ENKNV + ' WHERE prz_id = :prz_id AND knd_id = :knd_id)';
+  fSelectENVFME := 'SELECT vfme_id, prz_id, knd_id, vfme_rechnungsbetrag, vfme_zahlbetrag, vfme_rechnungstyp, vfme_mmma_gutschrift, vfme_summe_anzahlungen ' +
+                   'FROM ' + ENVFME + ' WHERE prz_id = :prz_id AND knd_id = :knd_id';
+  fSelectENGBT := 'SELECT * FROM ' + ENGBT + ' WHERE prz_id = :prz_id AND knd_id = :knd_id';
+
+  fSelectENMED := 'SELECT * FROM ' + ENMED + ' WHERE mes_id IN (SELECT mes_id FROM ' + ENMES + ' WHERE zpt_id = :zpt_id)';
+
+  fSelectENABS := 'SELECT * FROM ' + ENABS + ' WHERE knd_id = :knd_id';
+  fSelectENABT := 'SELECT * FROM ' + ENABT + ' WHERE abs_id = :abs_id';
+
+  fSelectENZLF := 'SELECT zlf_id, zpt_id, zlf_gueltigab, zlf_gueltigbis, lif_id, zlf_angelegt FROM ' + ENZLF + ' WHERE zpt_id = :zpt_id';
+
+  fSelectENPRZRA := 'SELECT * FROM ' + ENPRZRA + ' WHERE KND_ID = :knd_id';
+
+  fSelectENZMB := 'SELECT * FROM ' + ENZMB + ' WHERE zpt_id = :zpt_id';
+
+
+  fSelectENZPG := 'SELECT zpg_id, zpg.mnd_id, zpt_id, zpg_einbaudatum, zpg_status, zpg_angelegt, gerp_id, zpg_ausbaudatum, zpg_geaendert, zpg_wandlerfaktor, zpg_letzter_mdm_export, zpg_zae_nr, '
+   + 'NVL(zpg_geraetegrundtyp, 1) as zpg_geraetegrundtyp, zpg_naechsteseichjahr, zpg_naechstereichmonat, zpg.mene_id, zpg.zae_id, ' + CR_LF +
+   'zpg_zeitpunkt_einbau, zpg_zeitpunkt_ausbau ' + CR_LF +
+   ' FROM ' + ENZPG + ' zpg WHERE zpt_id = :zpt_id';
+
+  fSelectENZPG_ZPG := 'SELECT zpg_id, zpg.mnd_id, zpt_id, zpg_einbaudatum, zpg_status, zpg_angelegt, gerp_id, zpg_ausbaudatum, zpg_geaendert, zpg_wandlerfaktor, zpg_letzter_mdm_export, zpg_zae_nr, '
+   + 'NVL(zpg_geraetegrundtyp, 1) as zpg_geraetegrundtyp, zpg_naechsteseichjahr, zpg_naechstereichmonat, zpg.mene_id, zpg.zae_id, ' + CR_LF +
+   'zpg_zeitpunkt_einbau, zpg_zeitpunkt_ausbau ' + CR_LF +
+   ' FROM ' + ENZPG + ' zpg WHERE zpg_id = :zpg_id';
+
+   fSelectENZPGD := 'SELECT zpgd.* FROM ' + ENZPGD + ' zpgd WHERE zpg_id = :zpg_id';
+
+   fSelectENGBZSlave := 'SELECT gbz.* FROM ' + ENGBZ + ' gbz WHERE zpg_id_slave = :zpg_id';
+
+   fSelectENGBZMaster := 'SELECT gbz.* FROM ' + ENGBZ + ' gbz WHERE zpg_id_master = :zpg_id';
+
+   fSelectENEANLSP := 'SELECT * FROM ' + ENEANLSP + ' WHERE eanl_id = :eanl_id';
+
+   fSelectENEASSB := 'SELECT * FROM ' + ENEASSB + ' WHERE eanl_id = :eanl_id';
+
+   fSelectENEAAW := 'SELECT * FROM ' + ENEAAW + ' WHERE eanl_id = :eanl_id';
+
+   fSelectENEAEB := 'SELECT * FROM ' + ENEAEB + ' WHERE eanl_id = :eanl_id';
+
+   fSelectENEAES := 'SELECT * FROM ' + ENEAES + ' WHERE eaeb_id IN (SELECT eaeb_id FROM ' + ENEAEB + ' WHERE eanl_id = :eanl_id)';
+
+   fSelectENEAET := 'SELECT * FROM ' + ENEAET + ' WHERE eanl_id = :eanl_id';
+
+   fSelectENEATE := 'SELECT * FROM ' + ENEATE + ' WHERE eaet_id IN (SELECT eaet_id FROM ' + ENEAET + ' WHERE eanl_id = :eanl_id)';
+
+   fSelectENGBZD := 'SELECT * FROM ' + ENGBZD + ' WHERE gbzd_id = :gbzd_id';
+
+   fSelectENGER_Master := 'SELECT * FROM ' + ENGER + ' WHERE ger_id IN (SELECT ger_id_master FROM ' + ENGBZD + ' WHERE gbzd_id IN (SELECT gbzd_id FROM ' + ENGBZ + ' WHERE zpg_id_slave IN (SELECT zpg_id FROM ' + ENZPG + ' zpg LEFT JOIN ' + ENZAE + ' zae ON zae.zae_id = zpg.zae_id '
+   + 'WHERE zpt_id IN (SELECT eavs.zpt_id FROM ' + ENEAV + ' eav, ' + ENEAVS + ' eavs WHERE eav.eav_id = eavs.eav_id AND eav.eanl_id = :eanl_id ' + ')'
+   + 'AND zpg.zpg_status <> ' + IntToStr(ZPG_STATUS_STORNIERT) + ')))';
+
+   fSelectENGER_Slave:= 'SELECT * FROM ' + ENGER + ' WHERE ger_id IN (SELECT ger_id_slave FROM ' + ENGBZD + ' WHERE gbzd_id IN (SELECT gbzd_id FROM ' + ENGBZ + ' WHERE zpg_id_slave IN (SELECT zpg_id FROM ' + ENZPG + ' zpg LEFT JOIN ' + ENZAE + ' zae ON zae.zae_id = zpg.zae_id '
+   + 'WHERE zpt_id = :zpt_id AND zpg.zpg_status <> ' + IntToStr(ZPG_STATUS_STORNIERT) + ')))';
+
+   fSelectENEANI := 'SELECT * FROM ' + ENEANI + ' WHERE eanl_id = :eanl_id';
+
+   fSelectENEAVD := 'SELECT * FROM ' + ENEAVD + ' WHERE eanl_id = :eanl_id';
+
+   fSelectENTMV := 'SELECT * FROM ' + ENTMV + ' WHERE eanl_id = :eanl_id';
+
+   fSelectENEASEE := 'SELECT * FROM ' + ENEASEE + ' WHERE eanl_id = :eanl_id';
+
+   fSelectENEASEEOBS := 'SELECT * FROM ' + ENEASEEOBS + ' WHERE easee_id IN (SELECT easee_id FROM ' + ENEASEE + ' WHERE eanl_id = :eanl_id)';
+
+   fSelectENEANLVEKWK := 'SELECT * FROM ' + ENEANLVEKWK + ' WHERE eanl_id = :eanl_id';
+
+   fSelectENEANLVE := 'SELECT * FROM ' + ENEANLVE + ' WHERE eanl_id = :eanl_id';
+
+   fSelectENVEEPEX := 'SELECT * FROM ' + ENVEEPEX + ' WHERE eanl_id = :eanl_id';
+
+   fSelectENZAE := 'SELECT * FROM ' + ENZAE + ' zae WHERE zae_id = :zae_id';
+
+   fSelectENZZK := 'SELECT * FROM ' + ENZZK + ' zzk WHERE zae_id = :zae_id';
+
+   fSelectCRGPVG := 'SELECT * FROM ' + CRGPVG + ' gpvg WHERE ro_id = (SELECT ro_id FROM ' + ENKND + ' knd WHERE knd.knd_id = :knd_id)';
+
+   fSelectCRGPVL := 'SELECT * FROM ' + CRGPVL + ' gpvl WHERE gpvg_id IN  ('
+     + 'SELECT gpvg_id FROM ' + CRGPVG + ' gpvg WHERE ro_id = (SELECT ro_id FROM ' + ENKND + ' knd WHERE knd.knd_id = :knd_id))';
+
+   fSelectCRGPVTU := 'SELECT * FROM ' + CRGPVTU + ' gpvtu WHERE gpvg_id IN  ('
+     + 'SELECT gpvg_id FROM ' + CRGPVG + ' gpvg WHERE ro_id = (SELECT ro_id FROM ' + ENKND + ' knd WHERE knd.knd_id = :knd_id))';
+
+   fSelectENABNGMD := 'SELECT * FROM ' + ENABNGMD + ' WHERE abn_id = :abn_id';
+
+   fSelectENZPTTR := 'SELECT * FROM ' + fENZPTTR + ' WHERE zpt_id_malo = :zpt_id or zpt_id_tranche = :zpt_id';
+
+   fSelectENZPTTREANL := 'SELECT * FROM ' + fENZPTTREANL + ' WHERE zpttr_id IN ('
+   + 'SELECT zpttr_id FROM ' + fENZPTTR + ' WHERE zpt_id_malo = :zpt_id or zpt_id_tranche = :zpt_id)';
+
+   fSelectENLSCH := 'SELECT * FROM ' + ENLSCH + ' lsch WHERE knd_id = :knd_id';
+
+   fSelectENLSMW := 'SELECT * FROM ' + ENLSMW + ' lsmw WHERE lsch_id = :lsch_id';
+
+   fSelectENLSMH := 'SELECT * FROM ' + ENLSMH + ' lsmh WHERE lsmw_id = :lsmw_id';
+
+   fSelectENVBA := 'SELECT * FROM ' + ENVBA + ' WHERE vba_nr = :vba_nr AND mnd_id = ' + IntToStr(AMndId);
+
+   fSelectENKVE := 'SELECT * FROM ' + ENKVE + ' WHERE knd_id = :knd_id';
+
+   fSelectENKVP := 'SELECT * FROM ' + ENKVP + ' WHERE ver_id = :ver_id';
+
+   fSelectENVER := 'SELECT * FROM ' + ENVER + ' WHERE ver_id = :ver_id';
+
+   fSelectENVET := 'SELECT * FROM ' + ENVET + ' WHERE mnd_id = ' + IntToStr(AMndId) + ' AND vet_nr = :vet_nr';
+
+   fSelectENFLD := 'SELECT * FROM ' + ENFLD + ' WHERE mnd_id = ' + IntToStr(AMndId) + ' AND fld_name = :fld_name';
+
+   // OBIS auf System Hierarchie werden ausgeliefert
+   fSelectENOBSMeLo := 'SELECT * FROM ' + ENOBS + ' WHERE obs_verwendung = ''1'' AND obs_bezeichnung = :obs_bezeichnung AND hie_id = '
+      + IntToStr(HierarchieManager.RootHierarchie.FindHierarchieByMndId(AMndId).HieId);
+
+   fSelectENOBSMaLo := 'SELECT * FROM ' + ENOBS + ' WHERE obs_verwendung = ''2'' AND obs_bezeichnung = :obs_bezeichnung AND hie_id = '
+      + IntToStr(HierarchieManager.RootHierarchie.FindHierarchieByMndId(AMndId).HieId);
+
+   fSelectENZLF := 'SELECT * FROM ' + ENZLF + ' WHERE zpt_id = :zpt_id';
+
+   fSelectENZPK := 'SELECT * FROM ' + ENZPK + ' WHERE zpk_id = :zpk_id';
+
+   fSelectCRGPVR := 'SELECT * FROM ' + CRGPVR + ' WHERE gpvg_id = :gpvg_id';
+
+   fSelectENZTH := 'SELECT * FROM ' + ENZTH + ' WHERE zpt_id = :zpt_id';
+
+   fSelectENHZO := 'SELECT * FROM ' + ENHZO + ' WHERE hzo_nr = :hzo_nr';
+
+   fSelectENEANLBV := 'SELECT * FROM ' + ENEANLBV + ' WHERE eanl_id = :eanl_id';
+
+  fSelectENASTZ := 'SELECT * FROM ' + ENASTZ + ' WHERE zpt_id = :zpt_id';
+  fSelectENASTP := 'SELECT * FROM ' + ENASTP + ' WHERE astp_id = :astp_id';
+
+  fSelectENMPID := 'SELECT DISTINCT mpid_nummer, nbt_id, lif_id, mbt_id, mpid_qualifier, mnd_id, ene_id' + CR_LF
+                 + 'FROM ' + ENMPID + ' mpid, ' + EDINV + ' inv' + CR_LF
+                 + 'WHERE mpid_nummer = :mpid_nummer' + CR_LF
+                 + 'AND mnd_id = ' + IntToStr(AMndId);
+
+  fSelectENPAV := 'SELECT * FROM ' + ENPAV + ' WHERE eanl_id = :eanl_id';
+
+  fSelectENAAUF := 'SELECT * FROM ' + ENAAUF + ' WHERE zpt_id = :zpt_id';
+
+  fSelectENAAFE := 'SELECT * FROM ' + ENAAFE + ' WHERE aauf_id = :aauf_id';
+  fSelectENAAUI := 'SELECT * FROM ' + ENAAUI + ' WHERE aauf_id = :aauf_id';
+  fSelectENAAUS := 'SELECT * FROM ' + ENAAUS + ' WHERE aauf_id = :aauf_id';
+  fSelectENAAUB := 'SELECT * FROM ' + ENAAUB + ' WHERE aauf_id = :aauf_id';
+  fSelectENAKA := 'SELECT * FROM ' + ENAKA + ' WHERE aka_id = :aka_id';
+  fSelectENAPR := 'SELECT * FROM ' + ENAPR  + ' WHERE prz_id = :prz_id';
+
+  fSelectENABM := 'SELECT * FROM ' + ENABM  + ' WHERE zpt_id = :zpt_id';  // Kundendaten anonymisieren
+  fSelectENABZ := 'SELECT * FROM ' + ENABZ + ' WHERE abm_id = :abm_id';
+  fSelectENABK := 'SELECT * FROM ' + ENABK + ' WHERE abz_id = :abz_id';
+  fSelectENABW := 'SELECT * FROM ' + ENABW + ' WHERE abk_id = :abk_id';
+
+  fSelectENAAUW := 'SELECT * FROM ' + ENAAUW + ' WHERE aauf_id = :aauf_id';
+  fSelectENAZZU := 'SELECT * FROM ' + ENAZZU + ' WHERE aauf_id = :aauf_id';
+  fSelectENZSTE := 'SELECT * FROM ' + ENZSTE + ' WHERE zpt_id = :zpt_id';
+  fSelectENZSEF := 'SELECT * FROM ' + ENZSEF + ' WHERE zste_id = :zste_id';
+  fSelectENZSEI := 'SELECT * FROM ' + ENZSEI + ' WHERE zste_id = :zste_id';
+  fSelectENZMWE := 'SELECT * FROM ' + ENZMWE + ' WHERE zste_id = :zste_id';
+  fSelectENZMWZ := 'SELECT * FROM ' + ENZMWZ + ' WHERE zmwe_id = :zmwe_id';
+  fSelectENZSTEP := 'SELECT * FROM ' + ENZSTEP + ' WHERE zste_id = :zste_id';
+  fSelectENAMMR := 'SELECT * FROM ' + ENAMMR + ' WHERE ((aauf_id_melo = :aauf_id) OR (aauf_id_malo = :aauf_id))';
+  fSelectENMWMEMA := 'SELECT * FROM ' + ENMWMEMA + ' WHERE zpoe_id = :zpoe_id';
+
+  fSelectENZPTEM := 'SELECT * FROM ' + ENZPTEM + ' WHERE zpt_id = :zpt_id';
+  fSelectENZPTMA := 'SELECT * FROM ' + ENZPTMA + ' WHERE zptem_id = :zptem_id';
+
+  fSelectCRABRPG := 'SELECT * FROM ' + CRABRPG + ' WHERE prz_id = :prz_id AND knd_id = :knd_id';
+  fSelectCRRABG := 'SELECT * FROM ' + CRRABG + ' WHERE prz_id = :prz_id AND knd_id = :knd_id';
+
+  fSelectENMNN := 'SELECT * FROM ' + ENMNN + ' WHERE mlk_id = :mlk_id';
+  fSelectENMNA := 'SELECT * FROM ' + ENMNA + ' WHERE mnn_id = :mnn_id';
+  fSelectENART := 'SELECT * FROM ' + ENART + ' WHERE art_id = :art_id';
+  fSelectENGART := 'SELECT * FROM ' + ENGART + ' WHERE gart_id = :gart_id';
+
+  fSelectENZPM := 'SELECT * FROM ' + ENZPM + ' WHERE zpt_id = :zpt_id';
+  fSelectENZMK := 'SELECT * FROM ' + ENZMK + ' WHERE zpt_id = :zpt_id';
+  fSelectENZAP := 'SELECT * FROM ' + ENZAP + ' WHERE zpt_id = :zpt_id';
+  fSelectENKAKZ := 'SELECT * FROM ' + ENKAKZ + ' WHERE zpt_id = :zpt_id';
+  fSelectENMVAV := 'SELECT * FROM ' + ENMVAV + ' WHERE mva_id IN (SELECT mva_id FROM ' + ENMVA +
+                     ' WHERE mes_id IN (SELECT mes_id FROM ' + ENMES + ' WHERE zpt_id = :zpt_id))';
+  fSelectENMPMLK := 'SELECT * FROM ' + ENMPMLK + ' WHERE mlk_id IN (SELECT mlk_id FROM ' + ENZMLK + ' WHERE zpt_id = :zpt_id)';
+  fSelectENZPL := 'SELECT * FROM ' + ENZPL + ' WHERE zpt_id = :zpt_id';
+  fSelectENZPTB := 'SELECT * FROM ' + ENZPTB + ' WHERE zpt_id = :zpt_id';
+  fSelectENZPTI := 'SELECT * FROM ' + ENZPTI + ' WHERE zpt_id = :zpt_id';
+  fSelectENZPH := 'SELECT * FROM ' + ENZPH + ' WHERE zpt_id = :zpt_id';
+  fSelectENZPHV := 'SELECT * FROM ' + ENZPHV + ' WHERE zpth_id IN (SELECT zpth_id FROM ' + ENZPTH + ' WHERE zpt_id = :zpt_id)';
+
+  fSelectENZPGS  :=  'SELECT * FROM ' + ENZPGS + ' WHERE zpg_id = :zpg_id';
+  fSelectENGTW_ALT := 'SELECT * FROM ' + ENGTW + ' WHERE zpg_id_alt = :zpg_id';
+  fSelectENGTW_NEU := 'SELECT * FROM ' + ENGTW + ' WHERE zpg_id_neu = :zpg_id';
+
+  fSelectENTGW  :=  'SELECT * FROM ' + ENTGW + ' WHERE gtw_id = :gtw_id';
+  fSelectENTGWS  :=  'SELECT * FROM ' + ENTGWS + ' WHERE tgw_id IN (SELECT tgw_id FROM ' + ENTGW + ' WHERE gtw_id = :gtw_id)';
+  fSelectENGTA  :=  'SELECT * FROM ' + ENGTA + ' WHERE gta_id = :gta_id';
+  fSelectENATN := 'SELECT * FROM ' + ENATN + ' WHERE atn_id = :atn_id';
+  fSelectENATZ := 'SELECT * FROM ' + ENATZ + ' WHERE atn_id = :atn_id';
+  fSelectCRGPVT := 'SELECT * FROM ' + CRGPVT + ' WHERE gpvg_id = :gpvg_id';
+  fSelectENVBE := 'SELECT * FROM ' + ENVBE + ' WHERE vbe_id = :vbe_id';
+  fSelectENVBE_SMTP := 'SELECT DISTINCT vbe.* FROM ' + ENVBE + ' vbe JOIN ' + ENSMTPT +
+                        ' smtpt ON smtpt.vbe_id = vbe.vbe_id' + ' WHERE smtp_id = :smtp_id';
+
+  fSelectENABSR := 'SELECT * FROM ' + ENABSR + ' WHERE knd_id = :knd_id';
+  fSelectENABSZ := 'SELECT * FROM ' + ENABSZ + ' WHERE absr_id = :absr_id';
+  fSelectENVZR := 'SELECT * FROM ' + ENVZR + ' WHERE knd_id = :knd_id';
+  fSelectENVZZ := 'SELECT * FROM ' + ENVZZ + ' WHERE vzr_id = :vzr_id';
+  fSelectENESA := 'SELECT * FROM ' + ENESA + ' WHERE mes_id = :mes_id';
+  fSelectENEGA := 'SELECT * FROM ' + ENEGA + ' WHERE mes_id = :mes_id';
+  fSelectENEWA := 'SELECT * FROM ' + ENEWA + ' WHERE mes_id = :mes_id';
+  fSelectENESAM := 'SELECT * FROM ' + ENESAM + ' WHERE esa_id = :esa_id';
+  fSelectENEGAM := 'SELECT * FROM ' + ENEGAM + ' WHERE ega_id = :ega_id';
+  fSelectENEWAM := 'SELECT * FROM ' + ENEWAM + ' WHERE ewa_id = :ewa_id';
+  fSelectENPRDU := 'SELECT * FROM ' + ENPRDU + ' WHERE mes_id = :mes_id';
+  fSelectENPRDM := 'SELECT * FROM ' + ENPRDM + ' WHERE prdu_id = :prdu_id';
+  fSelectENPRDT := 'SELECT * FROM ' + ENPRDT + ' WHERE prdu_id = :prdu_id';
+  fSelectENTUA := 'SELECT * FROM ' + ENTUA + ' WHERE tua_id = :tua_id';
+//  fSelectCRRAB := 'SELECT * FROM ' + CRRAB + ' WHERE rab_id = :rab_id';
+  fSelectENKFG := 'SELECT * FROM ' + ENKFG + ' WHERE mnd_id = :mnd_id AND kfg_wert IS NOT NULL';
+
+end;
+
+Procedure TKundenExport.CheckIsCanceled;
+begin
+ if (FWartenThread <> nil) and FWartenThread.IsCanceled then
+  raise Exception.Create('Abbruch durch Benutzer');
+end;
+
+procedure TKundenExport.AddEexIdsByFkLinkId(AFkId: TLongId; AFkTyp: Integer);
+var expEpzObj, expEexObj, expLinkObj: TExpImpTableObj;
+    key: String;
+begin
+  if AFkId.IsNull then
+    exit;
+
+  if not FExportOptionen.DoEexExport then
+    exit;
+
+  key := IntToStr(AFkTyp) + '#' + AFkId.ToStr;
+
+  if (FEexSelectErledigt <> nil) then
+  begin
+    if (FEexSelectErledigt.IndexOf(key) >= 0) then
+      exit;
+  end
+   else
+  begin
+    FEexSelectErledigt := TStringList.Create;
+    FEexSelectErledigt.Duplicates := dupIgnore;
+  end;
+  FEexSelectErledigt.Add(key);
+
+  expEpzObj := FExportObjectManager.GetItemByIdentifier(CREPZ);
+  expEexObj := FExportObjectManager.GetItemByIdentifier(CREEX);
+
+  expLinkObj := FExportObjectManager.GetItemByIdentifier(CREPZL);
+  if FQrySelectEpzl = nil then
+  begin
+    FQrySelectEpzl := fConnection.CreateSQLQuery;
+    FQrySelectEpzl.SQL.Text :=
+      'SELECT EPZ_ID, EPZL_ID' + CR_LF +
+      'FROM '+ CREPZL + CR_LF +
+      'WHERE EPZL_FKTYP = :EPZL_FKTYP' + CR_LF +
+      'AND EPZL_FKID = :EPZL_FKID';
+    FQrySelectEpzl.DBPrepare;
+  end;
+
+  FQrySelectEpzl.ParamByName('EPZL_FKTYP').AsInteger := AFkTyp;
+  FQrySelectEpzl.ParamByName('EPZL_FKID').AsLongId := AFkId;
+  try
+    FQrySelectEpzl.Open;
+    while not FQrySelectEpzl.Eof do
+    begin
+      expLinkObj.SelectIdForExport(FQrySelectEpzl.fieldByName('EPZL_ID').AsLongId, 'EPZL_FKTYP ' + IntToStr(AFkTyp) + ' / EPZL_FKID ' + AFkId.ToStr);
+      expEpzObj.SelectIdForExport(FQrySelectEpzl.fieldByName('EPZ_ID').AsLongId, 'EPZL_FKTYP ' + IntToStr(AFkTyp) + ' / EPZL_FKID ' + AFkId.ToStr);
+      FQrySelectEpzl.Next;
+    end;
+  finally
+    FQrySelectEpzl.Close;
+  end;
+
+  expLinkObj := FExportObjectManager.GetItemByIdentifier(CREEL);
+  if FQrySelectEel = nil then
+  begin
+    FQrySelectEel := fConnection.CreateSQLQuery;
+    FQrySelectEel.SQL.Text :=
+      'SELECT EPZ_ID, eel.EEX_ID, eel.EEL_ID' + CR_LF +
+      'FROM '+ CREEL + ' eel JOIN ' + CREEX + ' eex on eex.eex_id = eel.eex_id' + CR_LF +
+      'WHERE EEL_FKTYP = :EEL_FKTYP' + CR_LF +
+      'AND EEL_FKID = :EEL_FKID';
+    FQrySelectEpzl.DBPrepare;
+  end;
+
+  FQrySelectEel.ParamByName('EEL_FKTYP').AsInteger := AFkTyp;
+  FQrySelectEel.ParamByName('EEL_FKID').AsLongId := AFkId;
+  try
+    FQrySelectEel.Open;
+    while not FQrySelectEpzl.Eof do
+    begin
+      expLinkObj.SelectIdForExport(FQrySelectEel.fieldByName('EEL_ID').AsLongId, 'EEL_FKTYP ' + IntToStr(AFkTyp) + ' / EEL_FKID ' + AFkId.ToStr);
+      expEpzObj.SelectIdForExport(FQrySelectEel.fieldByName('EPZ_ID').AsLongId, 'EEL_FKTYP ' + IntToStr(AFkTyp) + ' / EEL_FKID ' + AFkId.ToStr);
+      expEexObj.SelectIdForExport(FQrySelectEel.fieldByName('EEX_ID').AsLongId, 'EEL_FKTYP ' + IntToStr(AFkTyp) + ' / EEL_FKID ' + AFkId.ToStr);
+      FQrySelectEel.Next;
+    end;
+  finally
+    FQrySelectEel.Close;
+  end;
+end;
+
+procedure TKundenExport.SetAddonStatus(AStatusText: String);
+begin
+  SetStatus(FStatusTextBase + ' - ' + StringReplace(AStatusText, 'CREATOR.', '', []), false);
+end;
+
+procedure TKundenExport.SetStatus(AStatusText: String; ASetBaseStatusText: Boolean = true);
+begin
+  if Assigned(FWartenThread) then
+    FWartenThread.SetStatus(AStatusText);
+  if ASetBaseStatusText then
+    FStatusTextBase := AStatusText;
+end;
+
+constructor TKundenExport.Create;
+begin
+  inherited;
+  FStatusTextBase := '';
+  FExportLog := TStringList.Create;
+  FWartenThread := nil;
+  FSdManager := nil;
+  FMndMasterIds := TelIntegerObjectMap<TExportMndMasterIds>.Create(true);
+  FExportObjectManager := TExpImpObjectManager.Create(true);
+  FQrySelectEpzl := nil;
+  FQrySelectEel := nil;
+  FEexSelectErledigt := nil;
+end;
+
+function TKundenExport.DoProduktExport(AMndKndIdListe: TelSimpleIntegerList; AMitFrage: Boolean): Boolean;
+var
+  ExportList: TInterfaceList;
+  kndListe: TelSimpleIntegerList;
+  Intf: IInterface;
+begin
+  result := false;
+  if not AMitFrage or (ShowConfirmationDialog('Möchten mit dem Kunden verknüpfte Abrechnungsprodukte auch exportieren?') = mrYes) then
+  begin
+    ExportList := TInterfaceList.Create;
+    kndListe := TelSimpleIntegerList.Create;
+    try
+      kndListe.AddRange(AMndKndIdListe);
+      Intf := TProduktExport.Create(True, kndListe);
+      ExportList.Add(Intf);
+      TfrmEBExport.ShowExportDialog(fViewContext, fConnection, ExportList);
+      result := true;
+    finally
+      ExportList.Free;
+      kndListe.Free;
+    end;
+  end;
+end;
+
+procedure TKundenExport.CheckNbtIdZuNbtNr(AMndIdStr, ANbtNrStr: String);
+var
+  Qry: TSQLQuery;
+  NbtId: TLongId;
+begin
+  Qry := fConnection.CreateSQLQuery;
+  try
+    // In NbtNrList merken, um nicht bei jeder NBT_NR ID erneut zu laden
+    FNbtNrAusKnvList.Add(AnbtNrStr);
+
+    // NBT_ID laden
+    Qry.SQL.Add('SELECT nbt_id FROM ' + ENNBT);
+    Qry.SQL.Add('WHERE mnd_id = ' + AMndIdStr);
+    Qry.SQL.Add('AND nbt_nr = ' + QuotedStr(ANbtNrStr));
+    Qry.Open;
+    if (not Qry.Eof) then
+    begin
+      NbtId := Qry.FieldByName('nbt_id').AsLongId;
+      if (not NbtId.IsNull and (not FNBTIds.Contains(NbtId))) then
+      begin
+        // in ID List speichern
+        FNBTIds.Add(NbtId);
+      end;
+    end;
+  finally
+    Qry.Free;
+  end;
+end;
+
+// Daten müssen mandantscharf selektiert werden, deswegen zuerst wird Selekt initialisiert,
+// nach der Initialisierung werden die Listen mit NBT_ID und LIF_ID befüllt
+function TKundenExport.GetSelectENMPID(ASelect: String): String;
+var
+  NbtIdsStr, LifIdsStr, MbtIdsStr: String;
+begin
+  NbtIdsStr := ConvertLongIdListToSeparatedList(FNBTIds, ', ');
+  LifIdsStr := ConvertLongIdListToSeparatedList(FLifIds, ', ');
+  MbtIdsStr := ConvertLongIdListToSeparatedList(FMbtIds, ', ');
+
+  // Strings können auch leer sein, dann kommt ORA-Fehler bei AND ((lif_id IN (26)) OR (nbt_id IN ()))
+  if ((NbtIdsStr <> NULL_STRING) or (LifIdsStr <> NULL_STRING) or (MbtIdsStr <> NULL_STRING)) then
+  begin
+    if (NbtIdsStr = NULL_STRING) then
+      NbtIdsStr := '0';
+    if (LifIdsStr = NULL_STRING) then
+      LifIdsStr := '0';
+    if (MbtIdsStr = NULL_STRING) then
+      MbtIdsStr := '0';
+
+    Result := ASelect + CR_LF + 'AND ((lif_id IN (' + LifIdsStr + ')) OR (nbt_id IN (' + NbtIdsStr + ')) OR (mbt_id IN (' + MbtIdsStr + ')))';
+  end
+  else
+  begin
+    Result := ASelect;
+  end;
+end;
+
+procedure TKundenExport.LoadZstepListe(AQry: TSQLQuery; ATable: TTableObj);
+var
+  InStream: TStream;
+  ZipStream: TJclGZIPDecompressionStream;
+  JsonStr: UTF8String;
+  I: Integer;
+begin
+  InStream := CreateStreamFromBlob(AQry.FieldByName('ZSTEP_LISTE') );
+  try
+    ZipStream := TJclGZIPDecompressionStream.Create(InStream);
+    try
+      SetLength(JsonStr, ZipStream.OriginalDataSize);
+      if JsonStr <> '' then
+      begin
+        ZipStream.Read(PAnsiChar(JsonStr)^, Length(JsonStr));
+        for I := 0 to ATable.Columns.Count - 1 do
+        begin
+          if (TcolumnObj(ATable.Columns.Items[I]).Columnname = 'ZSTEP_LISTE') then
+          begin
+            TcolumnObj(ATable.Columns.Items[I]).FieldType := ftBlob;
+            TcolumnObj(ATable.Columns.Items[I]).Value := UTF8ToString(JsonStr);
+          end;
+        end;
+      end;
+    finally
+      ZipStream.Free;
+    end;
+  finally
+    InStream.Free;
+  end;
+end;
+
+procedure TKundenExport.RegisterTableIdList(ATableName: String);
+begin
+  if (not TableIdMapping.Contains(ATableName)) then
+  begin
+    TableIdMapping.AddObject(ATableName, TelSimpleLongIdList.Create);
+  end;
+end;
+
+function TKundenExport.AddIdToIdMapping(ATableName: String; AField: TField): Boolean;
+begin
+  Result := True;
+  if (not AField.IsNull) then
+  begin
+    if (TableIdMapping.Values[ATableName] = nil) then
+    begin
+      raise Exception.Create('Interner Fehler: ID Liste für ' + ATableName + ' ist nicht registriert!');
+    end;
+    Result := AddIdToList(TableIdMapping.Values[ATableName], AField.AsLongId);
+  end;
+end;
+
+{ TExportMndMasterIds }
+
+function TExportMndMasterIds.AddAbnId(AId: TLongId; ASource: String): Boolean;
+begin
+  result := AddId(aid, FAbnIds, FAbnIdsSelektiertDebugMap, ASource);
+end;
+
+function TExportMndMasterIds.AddEanlId(AId: TLongId; ASource: String): Boolean;
+begin
+  result := AddId(aid, FEanlIds, FEanlIdsSelektiertDebugMap, ASource)
+end;
+
+function TExportMndMasterIds.AddId(AId: TLongId; AList:TelSimpleLongIdList; ASelektiertDebugMap: TelLongIdStringMap; ASource: String): Boolean;
+begin
+  result := false;
+  if AId.IsNull then
+    exit;
+
+  result := AList.IndexOf(AId) <0;
+  if result then
+  begin
+    AList.Add(AId);
+    ASelektiertDebugMap.AddObject(AId, ASource);
+  end;
+end;
+
+function TExportMndMasterIds.AddKndId(AId: TLongId; ASource: String): Boolean;
+begin
+  result := AddId(AId, FKndIds, FKndIdsSelektiertDebugMap, ASource)
+end;
+
+function TExportMndMasterIds.AddLokbId(AId: TLongId; ASource: String): Boolean;
+begin
+result := AddId(AId, FLokbIds, FLokbIdsSelektiertDebugMap, ASource)
+end;
+
+function TExportMndMasterIds.AddMesId(AId: TLongId; ASource: String): Boolean;
+begin
+  result := AddId(AId, FMesIds, FMesIdsSelektiertDebugMap,  ASource)
+end;
+
+function TExportMndMasterIds.AddMlkId(AId: TLongId; ASource: String): Boolean;
+begin
+  result := AddId(AId, FMlkIds, FMlkIdsSelektiertDebugMap, ASource)
+end;
+
+function TExportMndMasterIds.AddTreId(AId: TLongId; ASource: String): Boolean;
+begin
+ result := AddId(AId, FTreIds, FTreIdsSelektiertDebugMap,  ASource)
+end;
+
+function TExportMndMasterIds.AddZptId(AId: TLongId; ASource: String): Boolean;
+begin
+  result := AddId(AId, FZptIds, FZptIdsSelektiertDebugMap, ASource)
+end;
+
+constructor TExportMndMasterIds.Create(AMndId: Integer);
+begin
+  mndId := AMndId;
+  FAbnIdsSelektiertDebugMap := TelLongIdStringMap.Create;
+  FEanlIdsSelektiertDebugMap := TelLongIdStringMap.Create;
+  FKndIdsSelektiertDebugMap := TelLongIdStringMap.Create;
+  FMlkIdsSelektiertDebugMap := TelLongIdStringMap.Create;
+  FZptIdsSelektiertDebugMap := TelLongIdStringMap.Create;
+  FMesIdsSelektiertDebugMap := TelLongIdStringMap.Create;
+  FTreIdsSelektiertDebugMap := TelLongIdStringMap.Create;
+  FLokbIdsSelektiertDebugMap := TelLongIdStringMap.Create;
+
+  FAbnIds := TelSimpleLongIdList.Create;
+  FEanlIds := TelSimpleLongIdList.Create;
+  FKndIds := TelSimpleLongIdList.Create;
+  FMlkIds := TelSimpleLongIdList.Create;
+  FZptIds := TelSimpleLongIdList.Create;
+  FMesIds := TelSimpleLongIdList.Create;
+  FTreIds := TelSimpleLongIdList.Create;
+  FLokbIds := TelSimpleLongIdList.Create;
+
+  ResetCounter;
+end;
+
+destructor TExportMndMasterIds.Destroy;
+begin
+  FAbnIdsSelektiertDebugMap.free;
+  FEanlIdsSelektiertDebugMap.free;
+  FKndIdsSelektiertDebugMap.free;
+  FMlkIdsSelektiertDebugMap.free;
+  FMesIdsSelektiertDebugMap.Free;
+  FZptIdsSelektiertDebugMap.free;
+  FTreIdsSelektiertDebugMap.Free;
+  FLokbIdsSelektiertDebugMap.free;
+
+  FAbnIds.free;
+  FEanlIds.free;
+  FKndIds.free;
+  FMlkIds.free;
+  FMesIds.Free;
+  FZptIds.free;
+  FTreIds.Free;
+  FLokbIds.free;
+  inherited;
+end;
+
+function TExportMndMasterIds.GetDebugInfos: String;
+
+  function AddDebugInfo(APrefix: String; ASelektiertDebugMap: TelLongIdStringMap):string;
+  var i: TLongId;
+      idStr: String;
+  begin
+    result := Aprefix + ': ';
+    if ASelektiertDebugMap.Count =0 then
+      result := result + 'keine'
+    else
+    begin
+      idStr := '';
+      for i in ASelektiertDebugMap.KeyCollection do
+      begin
+        if idStr <> '' then
+          idStr := idStr + ' | ';
+        idStr := idStr + 'ID: ' + i.ToStr + ' -> ' + ASelektiertDebugMap.Values[i];
+      end;
+      result := result + idStr;
+    end;
+  end;
+
+begin
+  result := 'Selektierte IDS im Mandant ' + IntToStr(MndId) + CR_LF +
+    AddDebugInfo('ENABN', FAbnIdsSelektiertDebugMap) + CR_LF +
+    AddDebugInfo('ENKND', FKndIdsSelektiertDebugMap) + CR_LF +
+    AddDebugInfo('ENMES', FMesIdsSelektiertDebugMap) + CR_LF +
+    AddDebugInfo('ENMLK', FMlkIdsSelektiertDebugMap) + CR_LF +
+    AddDebugInfo('ENZPT', FZptIdsSelektiertDebugMap) + CR_LF +
+    AddDebugInfo('ENEANL', FEanlIdsSelektiertDebugMap) + CR_LF +
+    AddDebugInfo('ENTRE', FTreIdsSelektiertDebugMap) + CR_LF +
+    AddDebugInfo('ENLOKB', FLokbIdsSelektiertDebugMap);
+end;
+
+function TExportMndMasterIds.HasNewAbnIdsSinceLastReset: Boolean;
+begin
+  result := FCntAbnIds <> FAbnIds.Count;
+end;
+
+function TExportMndMasterIds.HasNewEanlIdsSinceLastReset: Boolean;
+begin
+  result := FCntEanlIds <> FEanlIds.Count;
+end;
+
+function TExportMndMasterIds.HasNewKndIdsSinceLastReset: Boolean;
+begin
+  result := FCntKndIds <> FKndIds.Count;
+end;
+
+function TExportMndMasterIds.HasNewLokbIdsSinceLastReset: Boolean;
+begin
+  result := FCntLokbIds <> FLokbIds.Count;
+end;
+
+function TExportMndMasterIds.HasNewMesIdsSinceLastReset: Boolean;
+begin
+  result := FCntMesIds <> FMesIds.Count;
+end;
+
+function TExportMndMasterIds.HasNewMlkIdsSinceLastReset: Boolean;
+begin
+  result := FCntMlkIds <> FMlkIds.Count;
+end;
+
+function TExportMndMasterIds.HasNewTreIdsSinceLastReset: Boolean;
+begin
+  result := FCntTreIds <> FTreIds.Count;
+end;
+
+function TExportMndMasterIds.HasNewZptIdsSinceLastReset: Boolean;
+begin
+  result := FCntZptIds <> FZptIds.Count;
+end;
+
+procedure TExportMndMasterIds.ResetCounter;
+begin
+  FCntAbnIds := AbnIds.Count;
+  FCntMesIds := MesIds.Count;
+  FCntEanlIds := EanlIds.Count;
+  FCntKndIds := KndIds.Count;
+  FCntTreIds := TreIds.Count;
+  FCntMlkIds := MlkIds.Count;
+  FCntLokbIds := LokbIds.Count;
+  FCntZptIds := ZptIds.Count;
+end;
+
+end.
